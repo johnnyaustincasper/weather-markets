@@ -39,7 +39,7 @@ function App() {
     if (!markets.length) return 0;
     return markets.reduce((sum, market) => sum + market.confidence, 0) / markets.length;
   }, [markets]);
-  const liveContractCount = useMemo(() => markets.filter((market) => market.dataOrigin === 'polymarket-live').length, [markets]);
+  const liveContractCount = useMemo(() => markets.filter((market) => market.dataOrigin === 'polymarket-event' || market.dataOrigin === 'polymarket-live').length, [markets]);
 
   return (
     <div className="app-shell">
@@ -49,14 +49,14 @@ function App() {
         <section className="hero panel">
           <div>
             <p className="eyebrow">Weather Markets</p>
-            <h1>Parse listed weather contracts when they exist, and fall back cleanly when they do not.</h1>
+            <h1>Discover live weather markets from Gamma weather events first, then enrich them downstream.</h1>
             <p className="subtle hero-copy">
-              Live Polymarket discovery now uses stricter weather parsing, resolution-schema extraction, and watchlist mapping. Weather feeds still power the pricing blend.
+              The scanner now starts from Polymarket's weather-tagged events feed, flattens event markets directly into the app model, and only layers weather and CLOB context after discovery.
             </p>
             <div className="hero-status-row">
-              <span className="badge">{meta ? `${meta.totalPolymarketMarketsScanned} Polymarket markets scanned` : 'Loading feeds'}</span>
-              <span className="badge soft">{meta ? `${meta.livePolymarketParsedCount} weather contracts parsed` : 'Parsing rules'}</span>
-              {meta?.usedCuratedFallback && <span className="badge soft">Watchlist fallback still active</span>}
+              <span className="badge">{meta ? `${meta.livePolymarketEventCount} weather events discovered` : 'Loading feeds'}</span>
+              <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} event markets flattened` : 'Flattening events'}</span>
+              <span className="badge soft">{meta ? `${meta.livePolymarketParsedCount} markets schema-parsed` : 'Parsing rules'}</span>
               {selectedMarket && <span className="badge soft">Freshness {freshnessLabel(selectedMarket.freshnessMinutes)}</span>}
             </div>
           </div>
@@ -79,13 +79,13 @@ function App() {
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Parser status</span>
-            <strong>{meta?.livePolymarketParsedCount ?? 0} weather contracts parsed</strong>
-            <span className="subtle">{meta?.livePolymarketParsedTitles[0] ?? 'No confidently parsed live weather contracts right now.'}</span>
+            <strong>{meta?.livePolymarketParsedCount ?? 0} event markets schema-parsed</strong>
+            <span className="subtle">{meta?.livePolymarketParsedTitles[0] ?? 'No parsed live weather event markets right now.'}</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Model posture</span>
             <strong>{selectedMarket?.edge && selectedMarket.edge > 0 ? 'Constructive YES' : 'Prefer fade / NO'}</strong>
-            <span className="subtle">Based on listed-market mapping when available, otherwise schema-based fallback.</span>
+            <span className="subtle">Based on event-first discovery, then weather-feed and CLOB enrichment.</span>
           </div>
         </section>
 
@@ -125,8 +125,8 @@ function App() {
                         </div>
                       </td>
                       <td>
-                        <span className={`status-chip ${market.dataOrigin === 'polymarket-live' ? 'tone-good' : 'tone-muted'}`}>
-                          {market.dataOrigin === 'polymarket-live' ? 'Live' : 'Fallback'}
+                        <span className={`status-chip ${market.dataOrigin === 'polymarket-event' || market.dataOrigin === 'polymarket-live' ? 'tone-good' : 'tone-muted'}`}>
+                          {market.dataOrigin === 'polymarket-event' || market.dataOrigin === 'polymarket-live' ? 'Live event' : 'Fallback'}
                         </span>
                       </td>
                       <td>{pct(market.impliedProbability)}</td>
@@ -147,7 +147,7 @@ function App() {
                   onClick={() => setSelectedId(market.id)}
                 >
                   <div className="market-card-top">
-                    <span className="pill">{market.dataOrigin === 'polymarket-live' ? 'Live contract' : 'Fallback schema'}</span>
+                    <span className="pill">{market.dataOrigin === 'polymarket-event' || market.dataOrigin === 'polymarket-live' ? 'Live event market' : 'Fallback schema'}</span>
                     <span className={market.edge >= 0 ? 'positive' : 'negative'}>{signedPct(market.edge)}</span>
                   </div>
                   <strong>{market.title}</strong>
@@ -169,7 +169,7 @@ function App() {
                   <p className="eyebrow">Market detail</p>
                   <h2>{selectedMarket?.title ?? 'Select a market'}</h2>
                 </div>
-                <span className="badge soft">{selectedMarket?.dataOrigin === 'polymarket-live' ? 'Listed on Polymarket' : 'Schema fallback'}</span>
+                <span className="badge soft">{selectedMarket?.dataOrigin === 'polymarket-event' || selectedMarket?.dataOrigin === 'polymarket-live' ? 'Discovered from Gamma weather events' : 'Schema fallback'}</span>
               </div>
               {selectedMarket && (
                 <>
@@ -190,7 +190,7 @@ function App() {
                   <div className="detail-copy">
                     <div>
                       <span className="detail-label">Discovery</span>
-                      <p>{selectedMarket.discovery.hasExchangeContract ? 'Matched to a live Polymarket contract.' : 'No live contract confidently matched, so the watchlist schema remains active.'}</p>
+                      <p>{selectedMarket.discovery.hasExchangeContract ? 'Discovered directly from a live Gamma weather event market.' : 'No live contract confidently matched, so the fallback schema remains active.'}</p>
                     </div>
                     <div>
                       <span className="detail-label">Schema</span>
@@ -285,6 +285,11 @@ function App() {
                       <li>Recency score: {pct(selectedMarket.heuristicDetails.recencyScore)}</li>
                       <li>Source agreement: {pct(selectedMarket.heuristicDetails.sourceAgreement)}</li>
                       <li>Canonical query: {selectedMarket.discovery.canonicalQuery}</li>
+                      {selectedMarket.discovery.eventTitle && <li>Event: {selectedMarket.discovery.eventTitle}</li>}
+                      {selectedMarket.conditionId && <li>Condition ID: {selectedMarket.conditionId}</li>}
+                      {selectedMarket.clobTokenIds?.length ? <li>CLOB token IDs: {selectedMarket.clobTokenIds.join(', ')}</li> : null}
+                      {selectedMarket.outcomes?.length ? <li>Outcomes: {selectedMarket.outcomes.join(' / ')}</li> : null}
+                      {selectedMarket.outcomePrices?.length ? <li>Outcome prices: {selectedMarket.outcomePrices.map((price) => pct(price)).join(' / ')}</li> : null}
                     </ul>
                   </div>
                   <div className="score-card full muted-card">
