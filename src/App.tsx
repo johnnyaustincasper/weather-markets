@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { localMarketProvider } from './services/marketData';
+import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
 import { captureMarketHistory, getMarketHistory, getWatcherOverview, summarizeMarketTrend, type MarketHistorySnapshot, type MetricTrend } from './services/marketHistory';
-import type { MarketFeedMeta, WeatherMarket } from './types';
+import type { MarketFeedMeta, QuoteStatus, WeatherMarket } from './types';
 
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
 const REFRESH_MS = 90_000;
@@ -24,7 +24,7 @@ const formatClock = (iso?: string) => {
 
 type MarketStatus = 'live' | 'watch' | 'stale' | 'cold';
 type AlertTone = 'good' | 'warn' | 'bad';
-type AlertKind = 'edge' | 'confidence' | 'spread' | 'freshness' | 'status';
+type AlertKind = 'edge' | 'confidence' | 'spread' | 'freshness' | 'status' | 'quote';
 
 type MarketAlert = {
   id: string;
@@ -43,6 +43,9 @@ type MarketDelta = {
   confidenceDelta: number;
   disagreementDelta: number;
   freshnessDelta: number;
+  quoteSpreadDelta: number | null;
+  quoteStatusFrom: QuoteStatus;
+  quoteStatusTo: QuoteStatus;
   statusFrom: MarketStatus;
   statusTo: MarketStatus;
   alerts: MarketAlert[];
@@ -67,9 +70,9 @@ const toneForAlert = (kind: AlertKind, magnitude: number): AlertTone => {
 };
 
 const deriveMarketStatus = (market: WeatherMarket, watched: boolean): MarketStatus => {
-  if (market.freshnessMinutes >= 240) return 'cold';
-  if (market.freshnessMinutes >= 90 || market.confidence < 0.5) return 'stale';
-  if (watched || Math.abs(market.edge) >= 0.08 || market.confidence >= 0.74) return 'watch';
+  if (market.freshnessMinutes >= 240 || market.quoteStatus === 'empty') return 'cold';
+  if (market.freshnessMinutes >= 90 || market.confidence < 0.5 || market.quoteStatus === 'stale') return 'stale';
+  if (watched || Math.abs(market.edge) >= 0.08 || market.confidence >= 0.74 || market.quoteStatus === 'tight') return 'watch';
   return 'live';
 };
 
@@ -80,6 +83,11 @@ const buildMarketAlerts = (current: WeatherMarket, previous: WeatherMarket | und
   const confidenceDelta = current.confidence - (previous?.confidence ?? current.confidence);
   const disagreementDelta = current.disagreement - (previous?.disagreement ?? current.disagreement);
   const freshnessDelta = current.freshnessMinutes - (previous?.freshnessMinutes ?? current.freshnessMinutes);
+  const quoteSpreadDelta = current.clobQuote?.spread === null || current.clobQuote?.spread === undefined || previous?.clobQuote?.spread === null || previous?.clobQuote?.spread === undefined
+    ? null
+    : current.clobQuote.spread - previous.clobQuote.spread;
+  const quoteStatusFrom = previous?.quoteStatus ?? current.quoteStatus;
+  const quoteStatusTo = current.quoteStatus;
   const alerts: MarketAlert[] = [];
 
   if (previous) {
@@ -142,6 +150,35 @@ const buildMarketAlerts = (current: WeatherMarket, previous: WeatherMarket | und
       });
     }
 
+    if (quoteSpreadDelta !== null && Math.abs(quoteSpreadDelta) >= 0.02) {
+      const tightened = quoteSpreadDelta < 0;
+      alerts.push({
+        id: `${current.id}-quote-${current.lastUpdated}`,
+        marketId: current.id,
+        marketTitle: current.title,
+        kind: 'quote',
+        tone: tightened ? 'good' : 'warn',
+        summary: tightened ? 'Quote tightened' : 'Quote widened',
+        detail: `CLOB spread moved from ${quotePct(previous?.clobQuote?.spread)} to ${quotePct(current.clobQuote?.spread)}.`,
+        action: tightened ? 'Execution improved, re-check whether edge is still actionable.' : 'Execution worsened, size down or wait for better prints.',
+        createdAt: current.lastUpdated,
+      });
+    }
+
+    if (quoteStatusFrom !== quoteStatusTo) {
+      alerts.push({
+        id: `${current.id}-quote-status-${current.lastUpdated}`,
+        marketId: current.id,
+        marketTitle: current.title,
+        kind: 'quote',
+        tone: quoteStatusTo === 'tight' || quoteStatusTo === 'tradable' ? 'good' : 'warn',
+        summary: 'Quote status changed',
+        detail: `Quote posture moved from ${quoteStatusFrom.toUpperCase()} to ${quoteStatusTo.toUpperCase()}.`,
+        action: quoteStatusTo === 'tight' ? 'Execution is cleaner now, consider moving this up.' : 'Keep execution quality in mind before acting.',
+        createdAt: current.lastUpdated,
+      });
+    }
+
     if (statusFrom !== statusTo) {
       alerts.push({
         id: `${current.id}-status-${current.lastUpdated}`,
@@ -162,6 +199,9 @@ const buildMarketAlerts = (current: WeatherMarket, previous: WeatherMarket | und
     confidenceDelta,
     disagreementDelta,
     freshnessDelta,
+    quoteSpreadDelta,
+    quoteStatusFrom,
+    quoteStatusTo,
     statusFrom,
     statusTo,
     alerts,
@@ -216,29 +256,25 @@ function App() {
           const update = updates.find((item) => item.marketId === market.id);
           if (!update || (!update.clobQuote && update.impliedProbability === null)) return market;
 
-          const impliedProbability = update.impliedProbability ?? market.impliedProbability;
-          const clobQuote = update.clobQuote ?? market.clobQuote;
-          const edge = market.modelProbability - impliedProbability;
+          const nextMarket = applyQuoteRefreshToMarket(market, update);
           if (
-            impliedProbability === market.impliedProbability
-            && clobQuote?.bestBid === market.clobQuote?.bestBid
-            && clobQuote?.bestAsk === market.clobQuote?.bestAsk
-            && clobQuote?.midpoint === market.clobQuote?.midpoint
-            && clobQuote?.spread === market.clobQuote?.spread
-            && clobQuote?.lastTradePrice === market.clobQuote?.lastTradePrice
+            nextMarket.impliedProbability === market.impliedProbability
+            && nextMarket.edge === market.edge
+            && nextMarket.confidence === market.confidence
+            && nextMarket.disagreement === market.disagreement
+            && nextMarket.freshnessMinutes === market.freshnessMinutes
+            && nextMarket.quoteStatus === market.quoteStatus
+            && nextMarket.clobQuote?.bestBid === market.clobQuote?.bestBid
+            && nextMarket.clobQuote?.bestAsk === market.clobQuote?.bestAsk
+            && nextMarket.clobQuote?.midpoint === market.clobQuote?.midpoint
+            && nextMarket.clobQuote?.spread === market.clobQuote?.spread
+            && nextMarket.clobQuote?.lastTradePrice === market.clobQuote?.lastTradePrice
           ) {
             return market;
           }
 
           changed = true;
-          return {
-            ...market,
-            impliedProbability,
-            edge,
-            heuristicSummary: `${pct(impliedProbability)} market price from event-first discovery versus ${pct(market.modelProbability)} weather model context.`,
-            lastUpdated: update.updatedAt ?? market.lastUpdated,
-            clobQuote,
-          };
+          return nextMarket;
         });
 
         if (changed) {
@@ -508,6 +544,7 @@ function App() {
                 <>
                   <div className="detail-badges">
                     <span className={`status-chip ${statusToneClass(marketDeltas[selectedMarket.id]?.statusTo ?? 'live')}`}>Status {marketDeltas[selectedMarket.id]?.statusTo.toUpperCase()}</span>
+                    <span className={`status-chip ${quoteToneClass(selectedMarket.quoteStatus)}`}>Quote {selectedMarket.quoteStatus.toUpperCase()}</span>
                     {marketDeltas[selectedMarket.id]?.alerts.slice(0, 3).map((alert) => (
                       <span key={alert.id} className={`status-chip tone-${alert.tone}`}>{alert.summary}</span>
                     ))}
@@ -688,6 +725,8 @@ function App() {
                       <li>Weather score: {pct(selectedMarket.heuristicDetails.weatherScore)}</li>
                       <li>Recency score: {pct(selectedMarket.heuristicDetails.recencyScore)}</li>
                       <li>Source agreement: {pct(selectedMarket.heuristicDetails.sourceAgreement)}</li>
+                      <li>Quote age: {freshnessLabel(selectedMarket.heuristicDetails.quoteAgeMinutes)}</li>
+                      <li>Quote spread score: {pct(selectedMarket.heuristicDetails.quoteSpreadScore)}</li>
                       <li>Canonical query: {selectedMarket.discovery.canonicalQuery}</li>
                       {selectedMarket.discovery.eventTitle && <li>Event: {selectedMarket.discovery.eventTitle}</li>}
                       {selectedMarket.conditionId && <li>Condition ID: {selectedMarket.conditionId}</li>}
@@ -819,6 +858,12 @@ function statusToneClass(status: MarketStatus) {
   if (status === 'stale') return 'tone-warn';
   if (status === 'cold') return 'tone-bad';
   return 'tone-muted';
+}
+
+function quoteToneClass(status: QuoteStatus) {
+  if (status === 'tight' || status === 'tradable') return 'tone-good';
+  if (status === 'wide' || status === 'stale') return 'tone-warn';
+  return 'tone-bad';
 }
 
 export default App;

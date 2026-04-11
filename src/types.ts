@@ -35,6 +35,8 @@ export type ForecastHeuristicDetails = {
   weatherScore: number;
   recencyScore: number;
   sourceAgreement: number;
+  quoteAgeMinutes: number;
+  quoteSpreadScore: number;
 };
 
 export type DiscoveryInfo = {
@@ -70,6 +72,8 @@ export type ClobQuote = {
   spread: number | null;
   fetchedAt: string;
 };
+
+export type QuoteStatus = 'tight' | 'tradable' | 'wide' | 'stale' | 'empty';
 
 export type MarketQuoteUpdate = {
   marketId: string;
@@ -112,6 +116,7 @@ export type WeatherMarket = {
   outcomePrices?: number[];
   event?: EventMeta;
   clobQuote?: ClobQuote;
+  quoteStatus: QuoteStatus;
 };
 
 export type MarketFeedMeta = {

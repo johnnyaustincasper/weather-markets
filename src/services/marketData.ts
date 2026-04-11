@@ -1,4 +1,4 @@
-import type { ClobQuote, DiscoveryInfo, MarketFeedMeta, MarketQuoteUpdate, ResolutionSchema, Signal, WeatherMarket, WeatherMarketResponse } from '../types';
+import type { ClobQuote, DiscoveryInfo, MarketFeedMeta, MarketQuoteUpdate, QuoteStatus, ResolutionSchema, Signal, WeatherMarket, WeatherMarketResponse } from '../types';
 
 type MarketProvider = {
   getMarkets: () => Promise<WeatherMarketResponse>;
@@ -599,11 +599,88 @@ function disagreementFrom(values: number[]) {
   return clamp(Math.max(...values) - Math.min(...values));
 }
 
-function confidenceFrom(edge: number, disagreement: number, freshnessMinutes: number, parseConfidence: number, profile: EventScoringProfile) {
+function quoteAgeMinutesFrom(quote?: ClobQuote) {
+  return quote?.fetchedAt ? minutesSince(quote.fetchedAt) : 240;
+}
+
+function quoteSpreadScoreFrom(quote?: ClobQuote) {
+  if (!quote) return 0.12;
+  if (quote.bestBid === null && quote.bestAsk === null) return 0.08;
+  if (quote.spread === null) return 0.3;
+  return 1 - clamp(quote.spread / 0.18);
+}
+
+function quoteStatusFrom(quote?: ClobQuote): QuoteStatus {
+  const quoteAgeMinutes = quoteAgeMinutesFrom(quote);
+  if (!quote || (quote.bestBid === null && quote.bestAsk === null)) return 'empty';
+  if (quoteAgeMinutes >= 45) return 'stale';
+  const spread = quote.spread;
+  if (spread === null) return 'tradable';
+  if (spread <= 0.035) return 'tight';
+  if (spread <= 0.085) return 'tradable';
+  return 'wide';
+}
+
+function confidenceFrom(edge: number, disagreement: number, freshnessMinutes: number, parseConfidence: number, profile: EventScoringProfile, quote?: ClobQuote) {
   const edgeScore = clamp(Math.abs(edge) / 0.25);
   const agreementScore = 1 - clamp(disagreement / 0.4);
   const freshnessScore = 1 - clamp(freshnessMinutes / 720);
-  return clamp((edgeScore * 0.35 + agreementScore * 0.25 + freshnessScore * 0.15 + parseConfidence * 0.25) * profile.confidenceWeight, 0.08, 0.98);
+  const quoteAgeScore = 1 - clamp(quoteAgeMinutesFrom(quote) / 180);
+  const quoteSpreadScore = quoteSpreadScoreFrom(quote);
+  return clamp((edgeScore * 0.28 + agreementScore * 0.2 + freshnessScore * 0.14 + parseConfidence * 0.22 + quoteAgeScore * 0.08 + quoteSpreadScore * 0.08) * profile.confidenceWeight, 0.08, 0.98);
+}
+
+export function applyQuoteRefreshToMarket(market: WeatherMarket, update: MarketQuoteUpdate): WeatherMarket {
+  const impliedProbability = update.impliedProbability ?? market.impliedProbability;
+  const clobQuote = update.clobQuote ?? market.clobQuote;
+  const edge = clamp(market.modelProbability - impliedProbability, -1, 1);
+  const quoteAgeMinutes = quoteAgeMinutesFrom(clobQuote);
+  const freshnessMinutes = Math.max(quoteAgeMinutes, Math.max(0, minutesSince(update.updatedAt ?? market.lastUpdated)));
+  const disagreement = disagreementFrom([
+    ...market.sources.filter((source) => source.name !== 'Polymarket CLOB').map((source) => source.probability),
+    impliedProbability,
+  ]);
+  const profile = eventScoringProfile(market.resolutionSchema);
+  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, market.discovery.parseConfidence, profile, clobQuote);
+  const recencyScore = 1 - clamp(freshnessMinutes / 720);
+  const sourceAgreement = 1 - clamp(disagreement / 0.4);
+  const quoteStatus = quoteStatusFrom(clobQuote);
+  const heuristicSummary = `${fmtPct(impliedProbability)} market price versus ${fmtPct(market.modelProbability)} ${market.heuristicDetails.weatherScore === market.modelProbability ? market.resolutionSchema.kind.replace(/([A-Z])/g, ' $1').trim().toLowerCase() : 'weather'} model context for ${market.location}. ${quoteStatus === 'tight' ? 'Quote is tight.' : quoteStatus === 'wide' ? 'Quote is wide.' : quoteStatus === 'stale' ? 'Quote is aging.' : quoteStatus === 'empty' ? 'Order book is thin.' : 'Quote remains tradable.'}`;
+
+  return {
+    ...market,
+    impliedProbability,
+    edge,
+    disagreement,
+    confidence,
+    freshnessMinutes,
+    lastUpdated: update.updatedAt ?? market.lastUpdated,
+    heuristicSummary,
+    heuristicDetails: {
+      ...market.heuristicDetails,
+      recencyScore,
+      sourceAgreement,
+      quoteAgeMinutes,
+      quoteSpreadScore: quoteSpreadScoreFrom(clobQuote),
+    },
+    sources: market.sources.map((source) => source.name === 'Polymarket CLOB'
+      ? {
+        ...source,
+        probability: impliedProbability,
+        deltaVsMarket: 0,
+        freshnessMinutes: quoteAgeMinutes,
+        signal: 'neutral',
+        note: `Live quote refresh updated implied probability to ${fmtPct(impliedProbability)} with ${quoteStatus} quote status.`,
+      }
+      : {
+        ...source,
+        deltaVsMarket: source.probability - impliedProbability,
+        signal: signalForDelta(source.probability - impliedProbability),
+        freshnessMinutes: Math.max(source.freshnessMinutes, freshnessMinutes),
+      }),
+    clobQuote,
+    quoteStatus,
+  };
 }
 
 function discoveryFor(item: FlattenedEventMarket, schema: ResolutionSchema, canonicalLocation: string | null): DiscoveryInfo {
@@ -644,14 +721,14 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
   const freshnessCandidates = [item.market.updatedAt, item.event.updatedAt, nws?.properties?.updated].filter((value): value is string => Boolean(value));
   const freshnessMinutes = freshnessCandidates.length ? Math.min(...freshnessCandidates.map(minutesSince)) : 180;
   const disagreement = disagreementFrom([...built.sourceProbabilities, impliedProbability]);
-  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, schema.parseConfidence, profile);
+  const clobQuote = clobQuoteFor(item.market);
+  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, schema.parseConfidence, profile, clobQuote);
   const recencyScore = 1 - clamp(freshnessMinutes / 720);
   const sourceAgreement = 1 - clamp(disagreement / 0.4);
   const outcomes = parseStringArray(item.market.outcomes);
   const outcomePrices = parseOutcomePrices(item.market.outcomePrices);
   const clobTokenIds = parseStringArray(item.market.clobTokenIds);
   const displayedLocation = schema.location ?? canonicalLocation ?? 'Global / not parsed';
-  const clobQuote = clobQuoteFor(item.market);
 
   return {
     id: item.market.id,
@@ -688,6 +765,8 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
       weatherScore: built.modelProbability,
       recencyScore,
       sourceAgreement,
+      quoteAgeMinutes: quoteAgeMinutesFrom(clobQuote),
+      quoteSpreadScore: quoteSpreadScoreFrom(clobQuote),
     },
     sources: [
       {
@@ -723,6 +802,7 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
     outcomes,
     outcomePrices,
     clobQuote,
+    quoteStatus: quoteStatusFrom(clobQuote),
     event: {
       id: item.event.id,
       slug: item.event.slug,
