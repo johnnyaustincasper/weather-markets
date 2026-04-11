@@ -4,35 +4,38 @@ type MarketProvider = {
   getMarkets: () => Promise<WeatherMarketResponse>;
 };
 
+type PolymarketEvent = {
+  id: string;
+  slug: string;
+  title: string;
+  description?: string;
+  endDate?: string;
+  liquidity?: number | string;
+  volume24hr?: number | string;
+  updatedAt?: string;
+  markets?: PolymarketMarket[];
+};
+
 type PolymarketMarket = {
   id: string;
   question: string;
   slug: string;
+  conditionId?: string;
+  clobTokenIds?: string;
   endDate?: string;
-  liquidity?: string;
+  liquidity?: string | number;
+  liquidityClob?: string | number;
   volume24hr?: number | string;
+  volume24hrClob?: number | string;
   outcomes?: string;
   outcomePrices?: string;
   description?: string;
   updatedAt?: string;
 };
 
-type WatchlistSpec = {
-  id: string;
-  title: string;
-  contract: string;
-  canonicalQuery: string;
-  location: string;
-  expiryLabel: string;
-  side: 'YES' | 'NO';
-  latitude: number;
-  longitude: number;
-  resolutionSchema: ResolutionSchema;
-  thesisTemplate: string;
-  notesTemplate: string;
-  catalysts: string[];
-  risks: string[];
-  resolution: string;
+type FlattenedEventMarket = {
+  event: PolymarketEvent;
+  market: PolymarketMarket;
 };
 
 type OpenMeteoResponse = {
@@ -71,14 +74,20 @@ type WeatherInputs = {
   sourceNotes: {
     open: string;
     nws: string;
+    market: string;
   };
 };
 
-const polymarketUrl = 'https://gamma-api.polymarket.com/markets?limit=500&active=true&closed=false';
-const userAgent = 'weather-markets-scanner/0.2';
+type LocationGuess = {
+  label: string;
+  latitude: number;
+  longitude: number;
+};
+
+const polymarketEventsUrl = 'https://gamma-api.polymarket.com/events?tag_slug=weather&limit=100&active=true&closed=false';
+const userAgent = 'weather-markets-scanner/0.3';
 const now = () => new Date();
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
-const avg = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / (values.length || 1);
 const fmtPct = (value: number) => `${Math.round(value * 100)}%`;
 const fmtMoney = (value: number) => {
   if (!Number.isFinite(value) || value <= 0) return '--';
@@ -88,98 +97,28 @@ const fmtMoney = (value: number) => {
 };
 const minutesSince = (iso: string) => Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60_000));
 const signalForDelta = (delta: number): Signal => (delta > 0.03 ? 'bullish' : delta < -0.03 ? 'bearish' : 'neutral');
-const prettySchema = (schema: ResolutionSchema) => {
-  if (schema.operator === 'gte' && schema.threshold !== undefined && schema.threshold !== null) {
-    return `${schema.metric} ≥ ${schema.threshold}${schema.units ?? ''}`;
-  }
-  return schema.rawRule;
-};
 
-const watchlist: WatchlistSpec[] = [
-  {
-    id: 'nyc-rain',
-    title: 'NYC rainfall exceeds 0.50in over next 72h',
-    contract: 'Rainfall > 0.50in / 72h proxy',
-    canonicalQuery: 'new york city rainfall over 0.50 inches next 72 hours',
-    location: 'New York City',
-    expiryLabel: 'Next 72 hours',
-    side: 'YES',
-    latitude: 40.7128,
-    longitude: -74.006,
-    resolutionSchema: {
-      kind: 'precipitation',
-      metric: 'rainfall',
-      operator: 'gte',
-      threshold: 0.5,
-      units: 'in',
-      location: 'New York City',
-      observationWindow: '72h',
-      source: 'gauge or official local weather report',
-      rawRule: 'Total rainfall in New York City is at least 0.50 inches over the next 72 hours.',
-      parseConfidence: 0.98,
-    },
-    thesisTemplate: 'Rain risk is scored from hourly precipitation probabilities over the next 72 hours, then blended with NWS language intensity. If a real exchange contract appears, the same schema can price against its listed rule.',
-    notesTemplate: 'Watchlist fallback with a structured rainfall schema, ready to attach to a listed contract when Polymarket surfaces one.',
-    catalysts: ['Next NWS hourly refresh', 'Overnight QPF shift', 'Radar trend into the metro corridor'],
-    risks: ['Probability does not equal realized total', 'Convective miss can break the proxy', 'No direct exchange-listed weather contract live right now'],
-    resolution: 'Scanner fallback. Intended to mirror a measurable rainfall-style resolution schema rather than act as an exchange-settling contract.',
-  },
-  {
-    id: 'chicago-snow-risk',
-    title: 'Chicago precip/snow setup turns material in next 72h',
-    contract: 'Cold precipitation setup proxy',
-    canonicalQuery: 'chicago meaningful snow or cold precipitation next 72 hours',
-    location: 'Chicago',
-    expiryLabel: 'Next 72 hours',
-    side: 'YES',
-    latitude: 41.8781,
-    longitude: -87.6298,
-    resolutionSchema: {
-      kind: 'precipitation',
-      metric: 'cold precipitation risk',
-      operator: 'gte',
-      threshold: 0.35,
-      units: 'probability',
-      location: 'Chicago',
-      observationWindow: '72h',
-      source: 'forecast-derived watchlist proxy',
-      rawRule: 'Chicago shows a meaningful cold precipitation setup during the next 72 hours.',
-      parseConfidence: 0.82,
-    },
-    thesisTemplate: 'This proxy uses precipitation probability with a colder-city watchlist bias. It is a structured placeholder for snowfall or cold-precip contracts if those get listed.',
-    notesTemplate: 'Good seam for plugging in snowfall-specific exchange markets and accumulations later.',
-    catalysts: ['Short-range model cycle', 'NWS precip wording', 'Surface temperature trend'],
-    risks: ['Snowfall is not directly modeled yet', 'Warm boundary layer can invalidate the edge', 'Proxy may overstate accumulations'],
-    resolution: 'Scanner fallback, designed to map later into measurable snow or wintry-precip contract rules.',
-  },
-  {
-    id: 'phoenix-heat',
-    title: 'Phoenix reaches 100°F in next 72h',
-    contract: 'High temp ≥ 100°F / 72h proxy',
-    canonicalQuery: 'phoenix high temperature at least 100 degrees next 72 hours',
-    location: 'Phoenix',
-    expiryLabel: 'Next 72 hours',
-    side: 'YES',
-    latitude: 33.4484,
-    longitude: -112.074,
-    resolutionSchema: {
-      kind: 'temperatureMax',
-      metric: 'maximum temperature',
-      operator: 'gte',
-      threshold: 100,
-      units: '°F',
-      location: 'Phoenix',
-      observationWindow: '72h',
-      source: 'official local weather observation',
-      rawRule: 'Maximum temperature in Phoenix reaches at least 100°F during the next 72 hours.',
-      parseConfidence: 0.98,
-    },
-    thesisTemplate: 'Heat risk comes from the max Open-Meteo hourly temperature plus NWS hourly temperature path, with an urgency bump when the threshold is near. The same schema can price a real threshold contract when listed.',
-    notesTemplate: 'Useful for threshold-style weather markets and seasonal heat watchlists.',
-    catalysts: ['NWS hourly temperature drift', 'Cloud cover changes', 'Late-day heating efficiency'],
-    risks: ['Open-Meteo and NWS may lag local microsite effects', 'Airport readings can differ', 'No directly listed weather contract available now'],
-    resolution: 'Scanner fallback mapped to a clear temperature-threshold resolution schema.',
-  },
+const locationCatalog: LocationGuess[] = [
+  { label: 'New York City', latitude: 40.7128, longitude: -74.006 },
+  { label: 'Chicago', latitude: 41.8781, longitude: -87.6298 },
+  { label: 'Phoenix', latitude: 33.4484, longitude: -112.074 },
+  { label: 'Miami', latitude: 25.7617, longitude: -80.1918 },
+  { label: 'Houston', latitude: 29.7604, longitude: -95.3698 },
+  { label: 'Los Angeles', latitude: 34.0522, longitude: -118.2437 },
+  { label: 'Dallas', latitude: 32.7767, longitude: -96.797 },
+  { label: 'Atlanta', latitude: 33.749, longitude: -84.388 },
+  { label: 'Denver', latitude: 39.7392, longitude: -104.9903 },
+  { label: 'Seattle', latitude: 47.6062, longitude: -122.3321 },
+  { label: 'Boston', latitude: 42.3601, longitude: -71.0589 },
+  { label: 'Philadelphia', latitude: 39.9526, longitude: -75.1652 },
+  { label: 'Washington DC', latitude: 38.9072, longitude: -77.0369 },
+  { label: 'San Francisco', latitude: 37.7749, longitude: -122.4194 },
+  { label: 'Las Vegas', latitude: 36.1699, longitude: -115.1398 },
+  { label: 'New Orleans', latitude: 29.9511, longitude: -90.0715 },
+  { label: 'Orlando', latitude: 28.5383, longitude: -81.3792 },
+  { label: 'San Diego', latitude: 32.7157, longitude: -117.1611 },
+  { label: 'Minneapolis', latitude: 44.9778, longitude: -93.265 },
+  { label: 'Detroit', latitude: 42.3314, longitude: -83.0458 },
 ];
 
 async function fetchJson<T>(url: string): Promise<T> {
@@ -194,14 +133,18 @@ async function fetchJson<T>(url: string): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function parseOutcomePrices(prices?: string): number[] {
-  if (!prices) return [];
+function parseStringArray(value?: string): string[] {
+  if (!value) return [];
   try {
-    const parsed = JSON.parse(prices) as string[];
-    return parsed.map((value) => Number(value)).filter((value) => Number.isFinite(value));
+    const parsed = JSON.parse(value) as unknown[];
+    return parsed.map((item) => String(item));
   } catch {
     return [];
   }
+}
+
+function parseOutcomePrices(prices?: string): number[] {
+  return parseStringArray(prices).map((value) => Number(value)).filter((value) => Number.isFinite(value));
 }
 
 function parsePolymarketImpliedProbability(market: PolymarketMarket): number | null {
@@ -209,8 +152,8 @@ function parsePolymarketImpliedProbability(market: PolymarketMarket): number | n
   return prices.length ? clamp(prices[0]) : null;
 }
 
-function parseResolutionSchema(market: PolymarketMarket): ResolutionSchema | null {
-  const text = `${market.question} ${market.description ?? ''}`.replace(/\s+/g, ' ').trim();
+function parseResolutionSchema(item: FlattenedEventMarket): ResolutionSchema {
+  const text = `${item.market.question} ${item.market.description ?? ''} ${item.event.title} ${item.event.description ?? ''}`.replace(/\s+/g, ' ').trim();
   const lower = text.toLowerCase();
 
   const tempMatch = text.match(/([A-Z][A-Za-z .'-]+?)\s+(?:reaches|hits|hit|above|over|at least)\s+(\d{2,3})\s*°?\s*f/i)
@@ -222,9 +165,9 @@ function parseResolutionSchema(market: PolymarketMarket): ResolutionSchema | nul
       operator: 'gte',
       threshold: Number(tempMatch[2] ?? tempMatch[1]),
       units: '°F',
-      location: tempMatch[1] && tempMatch[2] ? tempMatch[1].trim() : undefined,
+      location: tempMatch[1] && tempMatch[2] ? tempMatch[1].trim() : guessLocation(text)?.label,
       rawRule: text,
-      parseConfidence: 0.72,
+      parseConfidence: 0.78,
     };
   }
 
@@ -236,83 +179,77 @@ function parseResolutionSchema(market: PolymarketMarket): ResolutionSchema | nul
       operator: 'gte',
       threshold: Number(precipMatch[3]),
       units: 'in',
-      location: precipMatch[1]?.trim(),
+      location: precipMatch[1]?.trim() ?? guessLocation(text)?.label,
       rawRule: text,
-      parseConfidence: 0.74,
+      parseConfidence: 0.8,
     };
   }
 
-  if (/(hurricane|tropical storm|storm surge|rainfall|snowfall|temperature|degrees|precipitation|wind chill|wind speed)/i.test(lower)) {
+  if (/(hurricane|tropical storm|storm surge|rainfall|snowfall|temperature|degrees|precipitation|wind chill|wind speed|heatwave|heat index)/i.test(lower)) {
     return {
       kind: 'unknown',
       metric: 'weather event',
       operator: 'unknown',
+      location: guessLocation(text)?.label,
       rawRule: text,
-      parseConfidence: 0.35,
+      parseConfidence: 0.45,
     };
   }
 
-  return null;
+  return {
+    kind: 'unknown',
+    metric: 'weather event',
+    operator: 'unknown',
+    location: guessLocation(text)?.label,
+    rawRule: text,
+    parseConfidence: 0.2,
+  };
 }
 
-function looksWeatherLinked(market: PolymarketMarket): boolean {
-  const combined = `${market.question} ${market.slug} ${market.description ?? ''}`.toLowerCase();
-  if (/(carolina hurricanes|miami heat|heat win|snow white|rainn|ceasefire|storming|brain|train)/i.test(combined)) return false;
-
-  const explicitWeather = [
-    /\brainfall\b/i,
-    /\bsnowfall\b/i,
-    /\bprecipitation\b/i,
-    /\btemperature\b/i,
-    /\bweather\b/i,
-    /\bhurricane\b/i,
-    /\btropical storm\b/i,
-    /\bstorm surge\b/i,
-    /\bwind speed\b/i,
-    /\bwind chill\b/i,
-    /\bheatwave\b/i,
-    /\bheat index\b/i,
-    /\bdegrees?\b/i,
-    /\brain\b/i,
-    /\bsnow\b/i,
-  ].some((pattern) => pattern.test(combined));
-
-  if (!explicitWeather) return false;
-  return parseResolutionSchema(market) !== null || /\b(weather|hurricane|rainfall|snowfall|temperature|precipitation)\b/i.test(combined);
+function prettySchema(schema: ResolutionSchema) {
+  if (schema.operator === 'gte' && schema.threshold !== undefined && schema.threshold !== null) {
+    return `${schema.metric} ≥ ${schema.threshold}${schema.units ?? ''}`;
+  }
+  return schema.rawRule;
 }
 
 function liquidityNumber(market: PolymarketMarket) {
-  return Number(market.liquidity) || 0;
+  return Number(market.liquidityClob ?? market.liquidity) || 0;
 }
 
 function volumeNumber(market: PolymarketMarket) {
-  return Number(market.volume24hr) || 0;
+  return Number(market.volume24hrClob ?? market.volume24hr) || 0;
 }
 
-async function getPolymarketSnapshot(): Promise<{ markets: PolymarketMarket[]; parsedMarkets: PolymarketMarket[]; meta: Pick<MarketFeedMeta, 'livePolymarketWeatherCount' | 'totalPolymarketMarketsScanned' | 'livePolymarketParsedCount' | 'livePolymarketParsedTitles'> }> {
+function guessLocation(text: string): LocationGuess | null {
+  const lower = text.toLowerCase();
+  return locationCatalog.find((location) => lower.includes(location.label.toLowerCase())) ?? null;
+}
+
+async function getPolymarketSnapshot(): Promise<{ items: FlattenedEventMarket[]; meta: Pick<MarketFeedMeta, 'livePolymarketWeatherCount' | 'totalPolymarketMarketsScanned' | 'livePolymarketParsedCount' | 'livePolymarketParsedTitles' | 'livePolymarketEventCount'> }> {
   try {
-    const markets = await fetchJson<PolymarketMarket[]>(polymarketUrl);
-    const weatherMarkets = markets.filter(looksWeatherLinked);
-    const parsedMarkets = weatherMarkets.filter((market) => parseResolutionSchema(market)?.parseConfidence);
+    const events = await fetchJson<PolymarketEvent[]>(polymarketEventsUrl);
+    const items = events.flatMap((event) => (event.markets ?? []).map((market) => ({ event, market })));
+    const parsedItems = items.filter((item) => parseResolutionSchema(item).parseConfidence >= 0.45);
     return {
-      markets: weatherMarkets,
-      parsedMarkets,
+      items,
       meta: {
-        livePolymarketWeatherCount: weatherMarkets.length,
-        totalPolymarketMarketsScanned: markets.length,
-        livePolymarketParsedCount: parsedMarkets.length,
-        livePolymarketParsedTitles: parsedMarkets.slice(0, 5).map((market) => market.question),
+        livePolymarketWeatherCount: items.length,
+        totalPolymarketMarketsScanned: items.length,
+        livePolymarketParsedCount: parsedItems.length,
+        livePolymarketParsedTitles: parsedItems.slice(0, 5).map((item) => item.market.question),
+        livePolymarketEventCount: events.length,
       },
     };
   } catch {
     return {
-      markets: [],
-      parsedMarkets: [],
+      items: [],
       meta: {
         livePolymarketWeatherCount: 0,
         totalPolymarketMarketsScanned: 0,
         livePolymarketParsedCount: 0,
         livePolymarketParsedTitles: [],
+        livePolymarketEventCount: 0,
       },
     };
   }
@@ -337,12 +274,12 @@ async function getOpenMeteo(latitude: number, longitude: number): Promise<OpenMe
   }
 }
 
-function buildPrecipProbabilities(spec: WatchlistSpec, openMeteo: OpenMeteoResponse | null, nws: NwsHourlyResponse | null): WeatherInputs {
+function buildPrecipProbabilities(openMeteo: OpenMeteoResponse | null, nws: NwsHourlyResponse | null): WeatherInputs {
   const openValues = (openMeteo?.hourly?.precipitation_probability ?? []).filter((value): value is number => value !== null).slice(0, 72);
   const nwsValues = (nws?.properties?.periods ?? []).map((period) => period.probabilityOfPrecipitation?.value).filter((value): value is number => value !== null).slice(0, 36);
-  const openProb = openValues.length ? clamp(Math.max(...openValues) / 100) : 0.35;
-  const nwsProb = nwsValues.length ? clamp(Math.max(...nwsValues) / 100) : 0.35;
-  const modelProbability = clamp(openProb * 0.55 + nwsProb * 0.45 + (spec.id.includes('chicago') ? 0.04 : 0));
+  const openProb = openValues.length ? clamp(Math.max(...openValues) / 100) : 0.4;
+  const nwsProb = nwsValues.length ? clamp(Math.max(...nwsValues) / 100) : 0.4;
+  const modelProbability = clamp(openProb * 0.55 + nwsProb * 0.45);
 
   return {
     observedValue: openValues.length ? Math.max(...openValues) / 100 : null,
@@ -351,14 +288,15 @@ function buildPrecipProbabilities(spec: WatchlistSpec, openMeteo: OpenMeteoRespo
     sourceNotes: {
       open: openValues.length ? `Peak hourly precipitation probability over next 72h reached ${Math.round(Math.max(...openValues))}%.` : 'Open-Meteo unavailable, fallback prior used.',
       nws: nwsValues.length ? `NWS hourly precip probability peaked at ${Math.round(Math.max(...nwsValues))}%.` : 'NWS hourly feed unavailable, fallback prior used.',
+      market: 'CLOB prices are applied after event discovery and weather enrichment.',
     },
   };
 }
 
-function buildTemperatureProbabilities(spec: WatchlistSpec, openMeteo: OpenMeteoResponse | null, nws: NwsHourlyResponse | null): WeatherInputs {
+function buildTemperatureProbabilities(schema: ResolutionSchema, openMeteo: OpenMeteoResponse | null, nws: NwsHourlyResponse | null): WeatherInputs {
   const openValues = (openMeteo?.hourly?.temperature_2m ?? []).filter((value): value is number => value !== null).slice(0, 72);
   const nwsValues = (nws?.properties?.periods ?? []).map((period) => period.temperature).filter((value): value is number => value !== undefined).slice(0, 36);
-  const threshold = spec.resolutionSchema.threshold ?? 100;
+  const threshold = schema.threshold ?? 100;
   const openMax = openValues.length ? Math.max(...openValues) : threshold - 4;
   const nwsMax = nwsValues.length ? Math.max(...nwsValues) : threshold - 3;
   const openProb = clamp(0.5 + (openMax - threshold) / 12);
@@ -372,6 +310,23 @@ function buildTemperatureProbabilities(spec: WatchlistSpec, openMeteo: OpenMeteo
     sourceNotes: {
       open: `Open-Meteo max hourly temperature is ${Math.round(openMax)}°F over the next 72h.`,
       nws: `NWS hourly temperature path peaks near ${Math.round(nwsMax)}°F.`,
+      market: 'CLOB prices are applied after event discovery and temperature enrichment.',
+    },
+  };
+}
+
+function buildGenericProbabilities(openMeteo: OpenMeteoResponse | null, nws: NwsHourlyResponse | null): WeatherInputs {
+  const precip = buildPrecipProbabilities(openMeteo, nws);
+  const temp = buildTemperatureProbabilities({ kind: 'temperatureMax', metric: 'maximum temperature', operator: 'gte', threshold: 90, units: '°F', rawRule: 'Generic weather event', parseConfidence: 0.2 }, openMeteo, nws);
+  const modelProbability = clamp(precip.modelProbability * 0.5 + temp.modelProbability * 0.5);
+  return {
+    observedValue: temp.observedValue,
+    modelProbability,
+    sourceProbabilities: [precip.sourceProbabilities[0], temp.sourceProbabilities[0]],
+    sourceNotes: {
+      open: 'Generic weather blend from Open-Meteo precipitation and temperature paths.',
+      nws: 'Generic weather blend from NWS hourly precipitation and temperature context.',
+      market: 'CLOB prices are applied after generic event discovery.',
     },
   };
 }
@@ -381,153 +336,141 @@ function disagreementFrom(values: number[]) {
   return clamp(Math.max(...values) - Math.min(...values));
 }
 
-function confidenceFrom(edge: number, disagreement: number, freshnessMinutes: number) {
+function confidenceFrom(edge: number, disagreement: number, freshnessMinutes: number, parseConfidence: number) {
   const edgeScore = clamp(Math.abs(edge) / 0.25);
   const agreementScore = 1 - clamp(disagreement / 0.4);
   const freshnessScore = 1 - clamp(freshnessMinutes / 720);
-  return clamp(edgeScore * 0.45 + agreementScore * 0.35 + freshnessScore * 0.2, 0.1, 0.98);
+  return clamp(edgeScore * 0.35 + agreementScore * 0.25 + freshnessScore * 0.15 + parseConfidence * 0.25, 0.1, 0.98);
 }
 
-function pickBestLiveMatch(spec: WatchlistSpec, liveMarkets: PolymarketMarket[]) {
-  const tokens = spec.canonicalQuery.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 2);
-  const scored = liveMarkets.map((market) => {
-    const text = `${market.question} ${market.slug} ${market.description ?? ''}`.toLowerCase();
-    const overlap = tokens.filter((token) => text.includes(token)).length;
-    const schema = parseResolutionSchema(market);
-    const schemaBonus = schema && schema.kind === spec.resolutionSchema.kind ? 3 : 0;
-    const locationBonus = spec.location.toLowerCase().split(/\s+/).some((part) => text.includes(part)) ? 2 : 0;
-    return { market, score: overlap + schemaBonus + locationBonus, schema };
-  }).sort((a, b) => b.score - a.score || volumeNumber(b.market) - volumeNumber(a.market));
-
-  return scored[0] && scored[0].score >= 5 ? scored[0] : null;
-}
-
-function blendedImpliedProbability(spec: WatchlistSpec, built: WeatherInputs, liveMatch: PolymarketMarket | null, liveMarkets: PolymarketMarket[]) {
-  const direct = liveMatch ? parsePolymarketImpliedProbability(liveMatch) : null;
-  if (direct !== null) return direct;
-
-  const liveWeatherCandidates = liveMarkets.map((market) => parsePolymarketImpliedProbability(market)).filter((value): value is number => value !== null);
-  const marketBaseline = liveWeatherCandidates.length ? avg(liveWeatherCandidates) : 0.5;
-  const locationBias = spec.location === 'Phoenix' ? 0.04 : spec.location === 'Chicago' ? -0.05 : -0.02;
-  return clamp(marketBaseline * 0.6 + built.modelProbability * 0.15 + 0.2 + locationBias);
-}
-
-function discoveryFor(spec: WatchlistSpec, liveMatch: ReturnType<typeof pickBestLiveMatch>): DiscoveryInfo {
+function discoveryFor(item: FlattenedEventMarket, schema: ResolutionSchema): DiscoveryInfo {
   return {
-    hasExchangeContract: Boolean(liveMatch),
-    matchedVia: liveMatch ? 'live-market' : 'watchlist-fallback',
-    parseConfidence: liveMatch?.schema?.parseConfidence ?? spec.resolutionSchema.parseConfidence,
-    canonicalQuery: spec.canonicalQuery,
-    schemaLabel: prettySchema(liveMatch?.schema ?? spec.resolutionSchema),
+    hasExchangeContract: true,
+    matchedVia: 'live-event-market',
+    parseConfidence: schema.parseConfidence,
+    canonicalQuery: item.event.slug,
+    schemaLabel: prettySchema(schema),
+    eventId: item.event.id,
+    eventSlug: item.event.slug,
+    eventTitle: item.event.title,
   };
 }
 
-async function normalizeWatchlistMarket(spec: WatchlistSpec, liveMarkets: PolymarketMarket[]): Promise<WeatherMarket> {
-  const [openMeteo, nws] = await Promise.all([getOpenMeteo(spec.latitude, spec.longitude), getNwsHourly(spec.latitude, spec.longitude)]);
-  const built = spec.resolutionSchema.kind === 'temperatureMax'
-    ? buildTemperatureProbabilities(spec, openMeteo, nws)
-    : buildPrecipProbabilities(spec, openMeteo, nws);
+async function normalizeEventMarket(item: FlattenedEventMarket): Promise<WeatherMarket> {
+  const schema = parseResolutionSchema(item);
+  const location = guessLocation(`${schema.location ?? ''} ${item.market.question} ${item.event.title}`);
+  const [openMeteo, nws] = location
+    ? await Promise.all([getOpenMeteo(location.latitude, location.longitude), getNwsHourly(location.latitude, location.longitude)])
+    : [null, null];
 
-  const nwsUpdated = nws?.properties?.updated;
-  const freshnessInputs = [nwsUpdated].filter((value): value is string => Boolean(value));
-  const freshnessMinutes = freshnessInputs.length ? Math.min(...freshnessInputs.map(minutesSince)) : 180;
-  const liveMatch = pickBestLiveMatch(spec, liveMarkets);
-  const impliedProbability = blendedImpliedProbability(spec, built, liveMatch?.market ?? null, liveMarkets);
+  const built = schema.kind === 'temperatureMax'
+    ? buildTemperatureProbabilities(schema, openMeteo, nws)
+    : schema.kind === 'precipitation'
+      ? buildPrecipProbabilities(openMeteo, nws)
+      : buildGenericProbabilities(openMeteo, nws);
+
+  const impliedProbability = parsePolymarketImpliedProbability(item.market) ?? 0.5;
   const edge = clamp(built.modelProbability - impliedProbability, -1, 1);
-  const disagreement = disagreementFrom(built.sourceProbabilities);
-  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes);
-  const lastUpdated = freshnessInputs[0] ?? new Date().toISOString();
-  const weatherScore = clamp(built.modelProbability);
+  const freshnessCandidates = [item.market.updatedAt, item.event.updatedAt, nws?.properties?.updated].filter((value): value is string => Boolean(value));
+  const freshnessMinutes = freshnessCandidates.length ? Math.min(...freshnessCandidates.map(minutesSince)) : 180;
+  const disagreement = disagreementFrom([...built.sourceProbabilities, impliedProbability]);
+  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, schema.parseConfidence);
   const recencyScore = 1 - clamp(freshnessMinutes / 720);
   const sourceAgreement = 1 - clamp(disagreement / 0.4);
-  const effectiveSchema = liveMatch?.schema ?? spec.resolutionSchema;
-  const discovery = discoveryFor(spec, liveMatch);
-
-  const sources = [
-    {
-      name: 'Open-Meteo',
-      probability: built.sourceProbabilities[0],
-      deltaVsMarket: built.sourceProbabilities[0] - impliedProbability,
-      signal: signalForDelta(built.sourceProbabilities[0] - impliedProbability),
-      note: built.sourceNotes.open,
-      freshnessMinutes,
-    },
-    {
-      name: 'NWS hourly',
-      probability: built.sourceProbabilities[1],
-      deltaVsMarket: built.sourceProbabilities[1] - impliedProbability,
-      signal: signalForDelta(built.sourceProbabilities[1] - impliedProbability),
-      note: built.sourceNotes.nws,
-      freshnessMinutes,
-    },
-    {
-      name: liveMatch ? 'Polymarket listed contract' : 'Scanner blend',
-      probability: liveMatch ? impliedProbability : built.modelProbability,
-      deltaVsMarket: liveMatch ? 0 : built.modelProbability - impliedProbability,
-      signal: liveMatch ? 'neutral' : signalForDelta(built.modelProbability - impliedProbability),
-      note: liveMatch
-        ? `Mapped from listed market “${liveMatch.market.question}” using parsed rule ${prettySchema(effectiveSchema)}.`
-        : `No live weather listing was confidently matched, so the scanner uses a structured ${effectiveSchema.kind} schema fallback.`,
-      freshnessMinutes: liveMatch?.market.updatedAt ? minutesSince(liveMatch.market.updatedAt) : freshnessMinutes,
-    },
-  ];
+  const outcomes = parseStringArray(item.market.outcomes);
+  const outcomePrices = parseOutcomePrices(item.market.outcomePrices);
+  const clobTokenIds = parseStringArray(item.market.clobTokenIds);
 
   return {
-    id: spec.id,
-    title: liveMatch?.market.question ?? spec.title,
-    contract: liveMatch?.market.question ?? spec.contract,
-    location: effectiveSchema.location ?? spec.location,
-    expiry: liveMatch?.market.endDate ? new Date(liveMatch.market.endDate).toLocaleString('en-US', { month: 'short', day: 'numeric' }) : spec.expiryLabel,
-    side: spec.side,
+    id: item.market.id,
+    title: item.market.question,
+    contract: item.event.title,
+    location: schema.location ?? location?.label ?? 'Global / not parsed',
+    expiry: item.market.endDate ? new Date(item.market.endDate).toLocaleString('en-US', { month: 'short', day: 'numeric' }) : (item.event.endDate ? new Date(item.event.endDate).toLocaleString('en-US', { month: 'short', day: 'numeric' }) : 'Live'),
+    side: 'YES',
     impliedProbability,
     modelProbability: built.modelProbability,
     edge,
     disagreement,
     confidence,
-    liquidity: liveMatch ? fmtMoney(liquidityNumber(liveMatch.market)) : (liveMarkets.length ? fmtMoney(avg(liveMarkets.map(liquidityNumber))) : '--'),
-    volume24h: liveMatch ? fmtMoney(volumeNumber(liveMatch.market)) : (liveMarkets.length ? fmtMoney(avg(liveMarkets.map(volumeNumber))) : '--'),
-    notes: liveMatch ? `Live Polymarket contract discovered and mapped to the watchlist schema. ${spec.notesTemplate}` : spec.notesTemplate,
-    thesis: spec.thesisTemplate,
-    catalysts: spec.catalysts,
-    risks: spec.risks,
-    resolution: liveMatch?.market.description ?? spec.resolution,
+    liquidity: fmtMoney(liquidityNumber(item.market)),
+    volume24h: fmtMoney(volumeNumber(item.market)),
+    notes: `Discovered from weather-tagged Gamma event “${item.event.title}”, then enriched with weather feeds and CLOB fields.`,
+    thesis: 'Event-first discovery from Gamma weather events, with downstream weather-model context and post-discovery market enrichment.',
+    catalysts: ['Gamma weather event updates', 'CLOB price movement', 'Open-Meteo refresh', 'NWS hourly refresh'],
+    risks: ['Location parsing may be coarse for global climate markets', 'Unknown-schema events use generic weather enrichment', 'Market language may not map cleanly into a single local observation rule'],
+    resolution: item.market.description ?? item.event.description ?? 'See Polymarket event description.',
     freshnessMinutes,
-    dataOrigin: liveMatch ? 'polymarket-live' : 'curated-watchlist',
-    lastUpdated,
-    heuristicSummary: liveMatch
-      ? `${fmtPct(impliedProbability)} listed market price mapped to ${prettySchema(effectiveSchema)}. Model blend sits at ${fmtPct(built.modelProbability)}.`
-      : `${fmtPct(built.modelProbability)} model probability from live weather feeds versus ${fmtPct(impliedProbability)} market prior, with a parsed ${effectiveSchema.kind} resolution schema ready for a listed contract.`,
+    dataOrigin: 'polymarket-event',
+    lastUpdated: freshnessCandidates[0] ?? new Date().toISOString(),
+    heuristicSummary: `${fmtPct(impliedProbability)} market price from event-first discovery versus ${fmtPct(built.modelProbability)} weather model context.`,
     heuristicDetails: {
-      thresholdLabel: prettySchema(effectiveSchema),
-      thresholdValue: effectiveSchema.threshold ?? null,
+      thresholdLabel: prettySchema(schema),
+      thresholdValue: schema.threshold ?? null,
       observedValue: built.observedValue,
-      units: effectiveSchema.units ?? '',
-      weatherScore,
+      units: schema.units ?? '',
+      weatherScore: built.modelProbability,
       recencyScore,
       sourceAgreement,
     },
-    sources,
-    resolutionSchema: effectiveSchema,
-    discovery,
-    marketSlug: liveMatch?.market.slug,
+    sources: [
+      {
+        name: 'Open-Meteo',
+        probability: built.sourceProbabilities[0] ?? built.modelProbability,
+        deltaVsMarket: (built.sourceProbabilities[0] ?? built.modelProbability) - impliedProbability,
+        signal: signalForDelta((built.sourceProbabilities[0] ?? built.modelProbability) - impliedProbability),
+        note: location ? built.sourceNotes.open : 'No reliable local location parse, so Open-Meteo enrichment was skipped.',
+        freshnessMinutes,
+      },
+      {
+        name: 'NWS hourly',
+        probability: built.sourceProbabilities[1] ?? built.modelProbability,
+        deltaVsMarket: (built.sourceProbabilities[1] ?? built.modelProbability) - impliedProbability,
+        signal: signalForDelta((built.sourceProbabilities[1] ?? built.modelProbability) - impliedProbability),
+        note: location ? built.sourceNotes.nws : 'No reliable local location parse, so NWS enrichment was skipped.',
+        freshnessMinutes,
+      },
+      {
+        name: 'Polymarket CLOB',
+        probability: impliedProbability,
+        deltaVsMarket: 0,
+        signal: 'neutral',
+        note: built.sourceNotes.market,
+        freshnessMinutes: item.market.updatedAt ? minutesSince(item.market.updatedAt) : freshnessMinutes,
+      },
+    ],
+    resolutionSchema: schema,
+    discovery: discoveryFor(item, schema),
+    marketSlug: item.market.slug,
+    conditionId: item.market.conditionId,
+    clobTokenIds,
+    outcomes,
+    outcomePrices,
+    event: {
+      id: item.event.id,
+      slug: item.event.slug,
+      title: item.event.title,
+      description: item.event.description,
+      endDate: item.event.endDate,
+      liquidity: Number(item.event.liquidity) || 0,
+      volume24hr: Number(item.event.volume24hr) || 0,
+      updatedAt: item.event.updatedAt,
+    },
   };
 }
 
 export async function getWeatherMarkets(): Promise<WeatherMarketResponse> {
   const polymarket = await getPolymarketSnapshot();
-  const markets = await Promise.all(watchlist.map((spec) => normalizeWatchlistMarket(spec, polymarket.markets)));
-  markets.sort((a, b) => {
-    if (a.dataOrigin !== b.dataOrigin) return a.dataOrigin === 'polymarket-live' ? -1 : 1;
-    return Math.abs(b.edge) * b.confidence - Math.abs(a.edge) * a.confidence;
-  });
+  const markets = await Promise.all(polymarket.items.map((item) => normalizeEventMarket(item)));
+  markets.sort((a, b) => Math.abs(b.edge) * b.confidence - Math.abs(a.edge) * a.confidence);
 
   return {
     markets,
     meta: {
       ...polymarket.meta,
-      usedCuratedFallback: !markets.some((market) => market.dataOrigin === 'polymarket-live'),
+      usedCuratedFallback: false,
       refreshedAt: now().toISOString(),
-      weatherSourceMix: ['Polymarket', 'Open-Meteo', 'NWS'],
+      weatherSourceMix: ['Gamma weather events', 'Polymarket CLOB', 'Open-Meteo', 'NWS'],
     },
   };
 }

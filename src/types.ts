@@ -1,6 +1,6 @@
 export type Signal = 'bullish' | 'bearish' | 'neutral';
 
-export type MarketDataOrigin = 'polymarket-live' | 'curated-watchlist';
+export type MarketDataOrigin = 'polymarket-event' | 'polymarket-live' | 'curated-watchlist';
 
 export type WeatherResolutionKind = 'precipitation' | 'temperatureMax' | 'windSpeed' | 'namedStorm' | 'unknown';
 
@@ -39,10 +39,36 @@ export type ForecastHeuristicDetails = {
 
 export type DiscoveryInfo = {
   hasExchangeContract: boolean;
-  matchedVia: 'live-market' | 'watchlist-fallback';
+  matchedVia: 'live-market' | 'watchlist-fallback' | 'live-event-market';
   parseConfidence: number;
   canonicalQuery: string;
   schemaLabel: string;
+  eventId?: string;
+  eventSlug?: string;
+  eventTitle?: string;
+};
+
+export type EventMeta = {
+  id: string;
+  slug: string;
+  title: string;
+  description?: string;
+  endDate?: string;
+  liquidity?: number;
+  volume24hr?: number;
+  updatedAt?: string;
+};
+
+export type ClobQuote = {
+  tokenId: string;
+  outcome: string;
+  bestBid: number | null;
+  bestAsk: number | null;
+  midpoint: number | null;
+  lastTradePrice: number | null;
+  tickSize: number | null;
+  spread: number | null;
+  fetchedAt: string;
 };
 
 export type WeatherMarket = {
@@ -73,6 +99,12 @@ export type WeatherMarket = {
   resolutionSchema: ResolutionSchema;
   discovery: DiscoveryInfo;
   marketSlug?: string;
+  conditionId?: string;
+  clobTokenIds?: string[];
+  outcomes?: string[];
+  outcomePrices?: number[];
+  event?: EventMeta;
+  clobQuote?: ClobQuote;
 };
 
 export type MarketFeedMeta = {
@@ -83,6 +115,7 @@ export type MarketFeedMeta = {
   weatherSourceMix: string[];
   livePolymarketParsedCount: number;
   livePolymarketParsedTitles: string[];
+  livePolymarketEventCount: number;
 };
 
 export type WeatherMarketResponse = {

@@ -4,6 +4,7 @@ import type { MarketFeedMeta, WeatherMarket } from './types';
 
 const pct = (value: number) => `${Math.round(value * 100)}%`;
 const signedPct = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`;
+const quotePct = (value: number | null | undefined) => (value === null || value === undefined ? '--' : pct(value));
 const freshnessLabel = (minutes: number) => {
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
@@ -178,6 +179,14 @@ function App() {
                     <Metric label="Edge" value={signedPct(selectedMarket.edge)} positive={selectedMarket.edge >= 0} />
                     <Metric label="24h volume" value={selectedMarket.volume24h} />
                   </div>
+                  {selectedMarket.clobQuote && (
+                    <div className="detail-metrics">
+                      <Metric label="CLOB bid" value={quotePct(selectedMarket.clobQuote.bestBid)} />
+                      <Metric label="CLOB ask" value={quotePct(selectedMarket.clobQuote.bestAsk)} />
+                      <Metric label="CLOB mid" value={quotePct(selectedMarket.clobQuote.midpoint)} />
+                      <Metric label="Spread" value={quotePct(selectedMarket.clobQuote.spread)} />
+                    </div>
+                  )}
                   <div className="detail-copy">
                     <div>
                       <span className="detail-label">Discovery</span>
@@ -199,6 +208,16 @@ function App() {
                       <span className="detail-label">Desk notes</span>
                       <p>{selectedMarket.notes}</p>
                     </div>
+                    {selectedMarket.clobQuote && (
+                      <div>
+                        <span className="detail-label">CLOB quote</span>
+                        <p>
+                          Outcome {selectedMarket.clobQuote.outcome} on token {selectedMarket.clobQuote.tokenId.slice(0, 10)}…,
+                          last trade {quotePct(selectedMarket.clobQuote.lastTradePrice)},
+                          tick {selectedMarket.clobQuote.tickSize ?? '--'}.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </>
               )}
