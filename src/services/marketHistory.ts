@@ -6,6 +6,7 @@ export type MarketHistorySnapshot = {
   edge: number;
   confidence: number;
   spread: number | null;
+  midpoint: number | null;
 };
 
 export type MarketHistoryRecord = {
@@ -82,6 +83,7 @@ function toSnapshot(market: WeatherMarket, capturedAt: string): MarketHistorySna
     edge: market.edge,
     confidence: market.confidence,
     spread: market.clobQuote?.spread ?? null,
+    midpoint: market.clobQuote?.midpoint ?? null,
   };
 }
 
@@ -91,6 +93,7 @@ function shouldAppendSnapshot(previous: MarketHistorySnapshot | undefined, next:
     || previous.edge !== next.edge
     || previous.confidence !== next.confidence
     || previous.spread !== next.spread
+    || previous.midpoint !== next.midpoint
     || previous.capturedAt !== next.capturedAt;
 }
 

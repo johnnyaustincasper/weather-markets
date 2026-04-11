@@ -487,6 +487,68 @@ tbody tr:hover,
   gap: 14px;
 }
 
+.sparkline-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.sparkline-card {
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  display: grid;
+  gap: 14px;
+}
+
+.sparkline-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.sparkline-copy strong {
+  font-size: 1.3rem;
+}
+
+.sparkline-copy small {
+  color: var(--muted);
+}
+
+.sparkline {
+  width: 100%;
+  height: 56px;
+  overflow: visible;
+}
+
+.sparkline path {
+  fill: none;
+  stroke-width: 4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sparkline-positive path {
+  stroke: #4ade80;
+}
+
+.sparkline-negative path {
+  stroke: #f87171;
+}
+
+.sparkline-neutral path {
+  stroke: #7dd3fc;
+}
+
+.sparkline-empty {
+  min-height: 56px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
 .score-card {
   padding: 18px;
   border-radius: 18px;
@@ -602,6 +664,7 @@ tbody tr:hover,
   .detail-metrics,
   .score-grid,
   .trend-grid,
+  .sparkline-grid,
   .operator-grid,
   .checklist-grid {
     grid-template-columns: 1fr;

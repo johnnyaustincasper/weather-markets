@@ -5,6 +5,7 @@ import type { MarketFeedMeta, WeatherMarket } from './types';
 
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
 const REFRESH_MS = 90_000;
+const QUOTE_REFRESH_MS = 20_000;
 const MAX_ALERTS = 18;
 
 const pct = (value: number) => `${Math.round(value * 100)}%`;
@@ -204,6 +205,53 @@ function App() {
     }
   }, []);
 
+  const refreshQuotes = useCallback(async () => {
+    try {
+      const updates = await localMarketProvider.getQuoteUpdates();
+      const capturedAt = new Date().toISOString();
+      let changed = false;
+
+      setMarkets((current) => {
+        const next = current.map((market) => {
+          const update = updates.find((item) => item.marketId === market.id);
+          if (!update || (!update.clobQuote && update.impliedProbability === null)) return market;
+
+          const impliedProbability = update.impliedProbability ?? market.impliedProbability;
+          const clobQuote = update.clobQuote ?? market.clobQuote;
+          const edge = market.modelProbability - impliedProbability;
+          if (
+            impliedProbability === market.impliedProbability
+            && clobQuote?.bestBid === market.clobQuote?.bestBid
+            && clobQuote?.bestAsk === market.clobQuote?.bestAsk
+            && clobQuote?.midpoint === market.clobQuote?.midpoint
+            && clobQuote?.spread === market.clobQuote?.spread
+            && clobQuote?.lastTradePrice === market.clobQuote?.lastTradePrice
+          ) {
+            return market;
+          }
+
+          changed = true;
+          return {
+            ...market,
+            impliedProbability,
+            edge,
+            heuristicSummary: `${pct(impliedProbability)} market price from event-first discovery versus ${pct(market.modelProbability)} weather model context.`,
+            lastUpdated: update.updatedAt ?? market.lastUpdated,
+            clobQuote,
+          };
+        });
+
+        if (changed) {
+          captureMarketHistory(next, capturedAt);
+          setHistoryTick((value) => value + 1);
+        }
+        return next;
+      });
+    } catch {
+      // Keep quote refresh best-effort so the heavier scan remains the source of truth.
+    }
+  }, []);
+
   useEffect(() => {
     void fetchMarkets();
   }, [fetchMarkets]);
@@ -220,6 +268,14 @@ function App() {
 
     return () => window.clearInterval(interval);
   }, [fetchMarkets]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void refreshQuotes();
+    }, QUOTE_REFRESH_MS);
+
+    return () => window.clearInterval(interval);
+  }, [refreshQuotes]);
 
   const selectedMarket = useMemo(
     () => markets.find((market) => market.id === selectedId) ?? markets[0],
@@ -247,6 +303,7 @@ function App() {
   const watcherOverview = useMemo(() => getWatcherOverview(), [historyTick]);
   const selectedTrend = useMemo(() => selectedMarket ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
   const selectedHistory = useMemo(() => selectedMarket ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
+  const selectedHistoryWindow = useMemo(() => selectedHistory.slice(-12), [selectedHistory]);
   const watchCount = watchIds.filter((id) => markets.some((market) => market.id === id)).length;
   const deterioratingCount = markets.filter((market) => (marketDeltas[market.id]?.freshnessDelta ?? 0) >= 20).length;
   const actionCount = allAlerts.filter((alert) => alert.tone !== 'bad').length;
@@ -491,6 +548,17 @@ function App() {
                       </div>
                     </div>
                   )}
+                  {!!selectedHistoryWindow.length && (
+                    <div>
+                      <span className="detail-label">Short-window trend tape</span>
+                      <div className="sparkline-grid">
+                        <SparklineMetric label="Implied" values={selectedHistoryWindow.map((snapshot) => snapshot.impliedProbability)} formatter={pct} tone="neutral" />
+                        <SparklineMetric label="Edge" values={selectedHistoryWindow.map((snapshot) => snapshot.edge)} formatter={signedPct} tone={(selectedHistoryWindow[selectedHistoryWindow.length - 1]?.edge ?? 0) >= 0 ? 'positive' : 'negative'} />
+                        <SparklineMetric label="Confidence" values={selectedHistoryWindow.map((snapshot) => snapshot.confidence)} formatter={pct} tone="positive" />
+                        <SparklineMetric label="CLOB spread" values={selectedHistoryWindow.map((snapshot) => snapshot.spread)} formatter={quotePct} tone="neutral" />
+                      </div>
+                    </div>
+                  )}
                   <div className="detail-copy">
                     <div>
                       <span className="detail-label">Discovery</span>
@@ -691,8 +759,58 @@ function HistoryRow({ snapshot }: { snapshot: MarketHistorySnapshot }) {
         <strong>{new Date(snapshot.capturedAt).toLocaleString()}</strong>
         <p>Implied {pct(snapshot.impliedProbability)} · Edge {signedPct(snapshot.edge)} · Confidence {pct(snapshot.confidence)}</p>
       </div>
-      <span>Spread {quotePct(snapshot.spread)}</span>
+      <span>Spread {quotePct(snapshot.spread)} · Mid {quotePct(snapshot.midpoint)}</span>
     </div>
+  );
+}
+
+function SparklineMetric({
+  label,
+  values,
+  formatter,
+  tone,
+}: {
+  label: string;
+  values: Array<number | null>;
+  formatter: (value: number) => string;
+  tone: 'positive' | 'negative' | 'neutral';
+}) {
+  const filtered = values.filter((value): value is number => value !== null && Number.isFinite(value));
+  const latest = filtered[filtered.length - 1] ?? null;
+  const first = filtered[0] ?? null;
+  const delta = latest !== null && first !== null ? latest - first : null;
+
+  return (
+    <div className="sparkline-card">
+      <div className="sparkline-copy">
+        <span>{label}</span>
+        <strong>{latest === null ? '--' : formatter(latest)}</strong>
+        <small className={tone === 'neutral' ? '' : tone}>{delta === null ? 'Need more local history' : `${delta >= 0 ? '+' : ''}${Math.round(delta * 100)} pts vs window start`}</small>
+      </div>
+      <Sparkline values={values} tone={tone} />
+    </div>
+  );
+}
+
+function Sparkline({ values, tone }: { values: Array<number | null>; tone: 'positive' | 'negative' | 'neutral' }) {
+  const points = values.filter((value): value is number => value !== null && Number.isFinite(value));
+  if (points.length < 2) return <div className="sparkline-empty">Need another refresh</div>;
+
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const range = max - min || 1;
+  const path = points
+    .map((value, index) => {
+      const x = (index / (points.length - 1)) * 100;
+      const y = 100 - ((value - min) / range) * 100;
+      return `${index === 0 ? 'M' : 'L'} ${x} ${y}`;
+    })
+    .join(' ');
+
+  return (
+    <svg className={`sparkline sparkline-${tone}`} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+      <path d={path} />
+    </svg>
   );
 }
 

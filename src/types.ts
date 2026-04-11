@@ -71,6 +71,13 @@ export type ClobQuote = {
   fetchedAt: string;
 };
 
+export type MarketQuoteUpdate = {
+  marketId: string;
+  impliedProbability: number | null;
+  clobQuote?: ClobQuote;
+  updatedAt?: string;
+};
+
 export type WeatherMarket = {
   id: string;
   title: string;

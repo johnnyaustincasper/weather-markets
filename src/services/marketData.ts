@@ -1,7 +1,8 @@
-import type { DiscoveryInfo, MarketFeedMeta, ResolutionSchema, Signal, WeatherMarket, WeatherMarketResponse } from '../types';
+import type { ClobQuote, DiscoveryInfo, MarketFeedMeta, MarketQuoteUpdate, ResolutionSchema, Signal, WeatherMarket, WeatherMarketResponse } from '../types';
 
 type MarketProvider = {
   getMarkets: () => Promise<WeatherMarketResponse>;
+  getQuoteUpdates: () => Promise<MarketQuoteUpdate[]>;
 };
 
 type PolymarketEvent = {
@@ -29,6 +30,11 @@ type PolymarketMarket = {
   volume24hrClob?: number | string;
   outcomes?: string;
   outcomePrices?: string;
+  bestBid?: number | string | null;
+  bestAsk?: number | string | null;
+  lastTradePrice?: number | string | null;
+  spread?: number | string | null;
+  orderPriceMinTickSize?: number | string | null;
   description?: string;
   updatedAt?: string;
 };
@@ -148,8 +154,45 @@ function parseOutcomePrices(prices?: string): number[] {
 }
 
 function parsePolymarketImpliedProbability(market: PolymarketMarket): number | null {
+  const bid = toNullableNumber(market.bestBid);
+  const ask = toNullableNumber(market.bestAsk);
+  if (bid !== null && ask !== null) return clamp((bid + ask) / 2);
+  if (bid !== null) return clamp(bid);
+  if (ask !== null) return clamp(ask);
   const prices = parseOutcomePrices(market.outcomePrices);
   return prices.length ? clamp(prices[0]) : null;
+}
+
+function toNullableNumber(value: number | string | null | undefined): number | null {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function clobQuoteFor(market: PolymarketMarket): ClobQuote | undefined {
+  const outcomes = parseStringArray(market.outcomes);
+  const tokenIds = parseStringArray(market.clobTokenIds);
+  const tokenId = tokenIds[0];
+  if (!tokenId) return undefined;
+
+  const bestBid = toNullableNumber(market.bestBid);
+  const bestAsk = toNullableNumber(market.bestAsk);
+  const midpoint = bestBid !== null && bestAsk !== null
+    ? clamp((bestBid + bestAsk) / 2)
+    : bestBid ?? bestAsk ?? null;
+  const spread = toNullableNumber(market.spread) ?? (bestBid !== null && bestAsk !== null ? clamp(bestAsk - bestBid, 0, 1) : null);
+
+  return {
+    tokenId,
+    outcome: outcomes[0] ?? 'Yes',
+    bestBid,
+    bestAsk,
+    midpoint,
+    lastTradePrice: toNullableNumber(market.lastTradePrice),
+    tickSize: toNullableNumber(market.orderPriceMinTickSize),
+    spread,
+    fetchedAt: market.updatedAt ?? now().toISOString(),
+  };
 }
 
 function parseResolutionSchema(item: FlattenedEventMarket): ResolutionSchema {
@@ -380,6 +423,7 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
   const outcomes = parseStringArray(item.market.outcomes);
   const outcomePrices = parseOutcomePrices(item.market.outcomePrices);
   const clobTokenIds = parseStringArray(item.market.clobTokenIds);
+  const clobQuote = clobQuoteFor(item.market);
 
   return {
     id: item.market.id,
@@ -444,6 +488,7 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
     marketSlug: item.market.slug,
     conditionId: item.market.conditionId,
     clobTokenIds,
+    clobQuote,
     outcomes,
     outcomePrices,
     event: {
@@ -457,6 +502,16 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
       updatedAt: item.event.updatedAt,
     },
   };
+}
+
+export async function getWeatherMarketQuoteUpdates(): Promise<MarketQuoteUpdate[]> {
+  const polymarket = await getPolymarketSnapshot();
+  return polymarket.items.map((item) => ({
+    marketId: item.market.id,
+    impliedProbability: parsePolymarketImpliedProbability(item.market),
+    clobQuote: clobQuoteFor(item.market),
+    updatedAt: item.market.updatedAt,
+  }));
 }
 
 export async function getWeatherMarkets(): Promise<WeatherMarketResponse> {
@@ -477,4 +532,5 @@ export async function getWeatherMarkets(): Promise<WeatherMarketResponse> {
 
 export const localMarketProvider: MarketProvider = {
   getMarkets: getWeatherMarkets,
+  getQuoteUpdates: getWeatherMarketQuoteUpdates,
 };
