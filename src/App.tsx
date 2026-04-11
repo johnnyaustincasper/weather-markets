@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { localMarketProvider } from './services/marketData';
-import { captureMarketHistory, getWatcherOverview } from './services/marketHistory';
+import { captureMarketHistory, getMarketHistory, getWatcherOverview, summarizeMarketTrend, type MarketHistorySnapshot, type MetricTrend } from './services/marketHistory';
 import type { MarketFeedMeta, WeatherMarket } from './types';
 
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
@@ -10,6 +10,7 @@ const MAX_ALERTS = 18;
 const pct = (value: number) => `${Math.round(value * 100)}%`;
 const signedPct = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`;
 const quotePct = (value: number | null | undefined) => (value === null || value === undefined ? '--' : pct(value));
+const signedQuotePct = (value: number | null | undefined) => (value === null || value === undefined ? '--' : `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`);
 const freshnessLabel = (minutes: number) => {
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
@@ -176,6 +177,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastScanAt, setLastScanAt] = useState<string>('');
+  const [historyTick, setHistoryTick] = useState(0);
 
   const fetchMarkets = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -183,8 +185,9 @@ function App() {
 
     try {
       const response = await localMarketProvider.getMarkets();
-      const capturedAt = new Date().toISOString();
+      const capturedAt = response.meta.refreshedAt || new Date().toISOString();
       captureMarketHistory(response.markets, capturedAt);
+      setHistoryTick((value) => value + 1);
       setMarkets((current) => {
         setPreviousMarkets(Object.fromEntries(current.map((market) => [market.id, market])));
         return response.markets;
@@ -241,7 +244,9 @@ function App() {
     if (!markets.length) return 0;
     return markets.reduce((sum, market) => sum + market.confidence, 0) / markets.length;
   }, [markets]);
-  const watcherOverview = useMemo(() => getWatcherOverview(), [markets]);
+  const watcherOverview = useMemo(() => getWatcherOverview(), [historyTick]);
+  const selectedTrend = useMemo(() => selectedMarket ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
+  const selectedHistory = useMemo(() => selectedMarket ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const watchCount = watchIds.filter((id) => markets.some((market) => market.id === id)).length;
   const deterioratingCount = markets.filter((market) => (marketDeltas[market.id]?.freshnessDelta ?? 0) >= 20).length;
   const actionCount = allAlerts.filter((alert) => alert.tone !== 'bad').length;
@@ -475,6 +480,17 @@ function App() {
                       emphasis
                     />
                   </div>
+                  {selectedTrend && (
+                    <div>
+                      <span className="detail-label">Persistent watcher deltas</span>
+                      <div className="trend-grid">
+                        <TrendMetric label="Implied" trend={selectedTrend.impliedProbability} formatter={pct} deltaFormatter={signedPct} />
+                        <TrendMetric label="Edge" trend={selectedTrend.edge} formatter={signedPct} deltaFormatter={signedPct} />
+                        <TrendMetric label="Confidence" trend={selectedTrend.confidence} formatter={pct} deltaFormatter={signedPct} />
+                        <TrendMetric label="Spread" trend={selectedTrend.spread} formatter={quotePct} deltaFormatter={signedQuotePct} />
+                      </div>
+                    </div>
+                  )}
                   <div className="detail-copy">
                     <div>
                       <span className="detail-label">Discovery</span>
@@ -508,6 +524,25 @@ function App() {
                     )}
                   </div>
                 </>
+              )}
+            </section>
+
+            <section className="panel history-panel">
+              <div className="panel-header">
+                <div>
+                  <p className="eyebrow">Watcher history</p>
+                  <h2>Recent local snapshots</h2>
+                </div>
+                <span className="badge soft">{selectedTrend?.snapshotCount ?? 0} captures</span>
+              </div>
+              {selectedHistory.length ? (
+                <div className="history-list">
+                  {selectedHistory.slice().reverse().map((snapshot, index) => (
+                    <HistoryRow key={`${snapshot.capturedAt}-${index}`} snapshot={snapshot} />
+                  ))}
+                </div>
+              ) : (
+                <p className="subtle">History appears once this market has been scanned locally and then revisited on a later refresh.</p>
               )}
             </section>
 
@@ -623,6 +658,40 @@ function ActionCard({ title, body, emphasis }: { title: string; body: string; em
     <div className={`operator-card ${emphasis ? 'emphasis-card' : ''}`}>
       <span>{title}</span>
       <strong>{body}</strong>
+    </div>
+  );
+}
+
+function TrendMetric({
+  label,
+  trend,
+  formatter,
+  deltaFormatter,
+}: {
+  label: string;
+  trend: MetricTrend;
+  formatter: (value: number) => string;
+  deltaFormatter: (value: number) => string;
+}) {
+  const tone = trend.direction === 'up' ? 'positive' : trend.direction === 'down' ? 'negative' : '';
+
+  return (
+    <div className="score-card">
+      <span>{label}</span>
+      <strong>{trend.current === null ? '--' : formatter(trend.current)}</strong>
+      <p className={tone}>{trend.delta === null ? 'Need another snapshot' : deltaFormatter(trend.delta)}</p>
+    </div>
+  );
+}
+
+function HistoryRow({ snapshot }: { snapshot: MarketHistorySnapshot }) {
+  return (
+    <div className="history-row">
+      <div>
+        <strong>{new Date(snapshot.capturedAt).toLocaleString()}</strong>
+        <p>Implied {pct(snapshot.impliedProbability)} · Edge {signedPct(snapshot.edge)} · Confidence {pct(snapshot.confidence)}</p>
+      </div>
+      <span>Spread {quotePct(snapshot.spread)}</span>
     </div>
   );
 }
