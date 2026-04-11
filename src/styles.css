@@ -43,6 +43,10 @@ button {
   font: inherit;
 }
 
+small {
+  color: var(--muted);
+}
+
 .app-shell {
   position: relative;
   overflow: hidden;
@@ -88,6 +92,13 @@ button {
   grid-template-columns: 1.4fr 1fr;
   gap: 24px;
   padding: 28px;
+}
+
+.hero-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
 }
 
 .eyebrow {
@@ -183,8 +194,17 @@ h2 {
   margin-bottom: 18px;
 }
 
-.table-panel, .detail-panel, .comparison-panel, .scoring-panel {
+.table-panel, .detail-panel, .comparison-panel, .scoring-panel, .loading-panel, .error-panel {
   padding: 24px;
+}
+
+.loading-panel, .error-panel {
+  margin-top: 20px;
+}
+
+.error-panel {
+  border-color: rgba(248, 113, 113, 0.25);
+  color: #ffd6db;
 }
 
 .badge, .pill {
@@ -337,7 +357,9 @@ tbody tr:hover, .active-row {
   .table-panel,
   .detail-panel,
   .comparison-panel,
-  .scoring-panel {
+  .scoring-panel,
+  .loading-panel,
+  .error-panel {
     padding: 18px;
     border-radius: 20px;
   }

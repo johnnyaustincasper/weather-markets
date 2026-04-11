@@ -1,19 +1,31 @@
 import { useEffect, useMemo, useState } from 'react';
 import { localMarketProvider } from './services/marketData';
-import type { WeatherMarket } from './types';
+import type { MarketFeedMeta, WeatherMarket } from './types';
 
 const pct = (value: number) => `${Math.round(value * 100)}%`;
 const signedPct = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`;
+const freshnessLabel = (minutes: number) => {
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}h ago`;
+};
 
 function App() {
   const [markets, setMarkets] = useState<WeatherMarket[]>([]);
+  const [meta, setMeta] = useState<MarketFeedMeta | null>(null);
   const [selectedId, setSelectedId] = useState<string>('');
+  const [error, setError] = useState<string>('');
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    localMarketProvider.getMarkets().then((data) => {
-      setMarkets(data);
-      setSelectedId(data[0]?.id ?? '');
-    });
+    localMarketProvider.getMarkets()
+      .then((response) => {
+        setMarkets(response.markets);
+        setMeta(response.meta);
+        setSelectedId(response.markets[0]?.id ?? '');
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : 'Unable to load weather markets.'))
+      .finally(() => setLoading(false));
   }, []);
 
   const selectedMarket = useMemo(
@@ -35,17 +47,26 @@ function App() {
         <section className="hero panel">
           <div>
             <p className="eyebrow">Weather Markets</p>
-            <h1>Scan clean weather mispricings before the tape catches up.</h1>
+            <h1>Scan live weather dislocations before the tape catches up.</h1>
             <p className="subtle hero-copy">
-              Premium triage for forecast-driven prediction markets, blending market pricing with modeled weather probabilities.
+              Real feed blend using Polymarket market context plus live Open-Meteo and NWS forecasts. Heuristics are intentionally simple and ready for model upgrades.
             </p>
+            <div className="hero-status-row">
+              <span className="badge">{meta ? `${meta.totalPolymarketMarketsScanned} Polymarket markets scanned` : 'Loading feeds'}</span>
+              {meta?.usedCuratedFallback && <span className="badge soft">Curated weather fallback active</span>}
+              {selectedMarket && <span className="badge soft">Freshness {freshnessLabel(selectedMarket.freshnessMinutes)}</span>}
+            </div>
           </div>
           <div className="hero-metrics">
             <Metric label="Live candidates" value={String(markets.length).padStart(2, '0')} />
             <Metric label="Best absolute edge" value={signedPct(topEdge)} positive={topEdge > 0} />
             <Metric label="Average confidence" value={pct(avgConfidence)} />
+            <Metric label="Live weather markets on Polymarket" value={String(meta?.livePolymarketWeatherCount ?? 0).padStart(2, '0')} />
           </div>
         </section>
+
+        {error && <section className="panel error-panel">{error}</section>}
+        {loading && <section className="panel loading-panel">Refreshing live market and weather feeds…</section>}
 
         <section className="summary-grid">
           <div className="panel summary-card">
@@ -56,12 +77,12 @@ function App() {
           <div className="panel summary-card">
             <span className="summary-label">Source dispersion</span>
             <strong>{selectedMarket ? pct(selectedMarket.disagreement) : '0%'}</strong>
-            <span className="subtle">Higher means more forecast disagreement across sources.</span>
+            <span className="subtle">Higher means the live sources disagree more.</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Model posture</span>
             <strong>{selectedMarket?.edge && selectedMarket.edge > 0 ? 'Constructive YES' : 'Prefer fade / NO'}</strong>
-            <span className="subtle">Driven by internal blend versus market implied pricing.</span>
+            <span className="subtle">Based on blended weather heuristics versus market prior.</span>
           </div>
         </section>
 
@@ -72,7 +93,7 @@ function App() {
                 <p className="eyebrow">Candidates</p>
                 <h2>Opportunity board</h2>
               </div>
-              <span className="badge">Mock feed, integration-ready</span>
+              <span className="badge">{meta?.weatherSourceMix.join(' · ') ?? 'Live feeds'}</span>
             </div>
             <div className="table-wrap">
               <table>
@@ -84,6 +105,7 @@ function App() {
                     <th>Edge</th>
                     <th>Disagreement</th>
                     <th>Confidence</th>
+                    <th>Freshness</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -104,6 +126,7 @@ function App() {
                       <td className={market.edge >= 0 ? 'positive' : 'negative'}>{signedPct(market.edge)}</td>
                       <td>{pct(market.disagreement)}</td>
                       <td>{pct(market.confidence)}</td>
+                      <td>{freshnessLabel(market.freshnessMinutes)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -125,7 +148,7 @@ function App() {
                   <div className="market-card-metrics">
                     <span>Market {pct(market.impliedProbability)}</span>
                     <span>Model {pct(market.modelProbability)}</span>
-                    <span>Conf {pct(market.confidence)}</span>
+                    <span>{freshnessLabel(market.freshnessMinutes)}</span>
                   </div>
                 </button>
               ))}
@@ -139,7 +162,7 @@ function App() {
                   <p className="eyebrow">Market detail</p>
                   <h2>{selectedMarket?.title ?? 'Select a market'}</h2>
                 </div>
-                <span className="badge soft">{selectedMarket?.liquidity ?? '--'} liquidity</span>
+                <span className="badge soft">{selectedMarket?.liquidity ?? '--'} avg liquidity context</span>
               </div>
               {selectedMarket && (
                 <>
@@ -150,6 +173,10 @@ function App() {
                     <Metric label="24h volume" value={selectedMarket.volume24h} />
                   </div>
                   <div className="detail-copy">
+                    <div>
+                      <span className="detail-label">Heuristic summary</span>
+                      <p>{selectedMarket.heuristicSummary}</p>
+                    </div>
                     <div>
                       <span className="detail-label">Thesis</span>
                       <p>{selectedMarket.thesis}</p>
@@ -184,6 +211,7 @@ function App() {
                     <div className="source-metrics">
                       <span>{pct(source.probability)}</span>
                       <span className={source.deltaVsMarket >= 0 ? 'positive' : 'negative'}>{signedPct(source.deltaVsMarket)}</span>
+                      <small>{freshnessLabel(source.freshnessMinutes)}</small>
                     </div>
                   </div>
                 ))}
@@ -202,22 +230,31 @@ function App() {
                   <div className="score-card">
                     <span>Edge quality</span>
                     <strong>{signedPct(selectedMarket.edge)}</strong>
-                    <p>Bigger dislocation between market and model increases rank.</p>
+                    <p>Bigger dislocations between market prior and blend rank higher.</p>
                   </div>
                   <div className="score-card">
                     <span>Confidence</span>
                     <strong>{pct(selectedMarket.confidence)}</strong>
-                    <p>Confidence rises when signals align and resolution is clean.</p>
+                    <p>Confidence rises with freshness and source agreement.</p>
                   </div>
                   <div className="score-card">
-                    <span>Disagreement penalty</span>
+                    <span>Disagreement</span>
                     <strong>{pct(selectedMarket.disagreement)}</strong>
-                    <p>Higher source spread tempers sizing and caps conviction.</p>
+                    <p>Higher spread across live sources tempers conviction.</p>
+                  </div>
+                  <div className="score-card">
+                    <span>Freshness</span>
+                    <strong>{freshnessLabel(selectedMarket.freshnessMinutes)}</strong>
+                    <p>Based on the latest weather feed timestamps seen by the pipeline.</p>
                   </div>
                   <div className="score-card full">
-                    <span>Key catalysts</span>
+                    <span>Heuristic inputs</span>
                     <ul>
-                      {selectedMarket.catalysts.map((item) => <li key={item}>{item}</li>)}
+                      <li>Threshold: {selectedMarket.heuristicDetails.thresholdLabel}</li>
+                      <li>Observed: {selectedMarket.heuristicDetails.observedValue === null ? 'n/a' : `${Math.round(selectedMarket.heuristicDetails.observedValue * 10) / 10} ${selectedMarket.heuristicDetails.units}`}</li>
+                      <li>Weather score: {pct(selectedMarket.heuristicDetails.weatherScore)}</li>
+                      <li>Recency score: {pct(selectedMarket.heuristicDetails.recencyScore)}</li>
+                      <li>Source agreement: {pct(selectedMarket.heuristicDetails.sourceAgreement)}</li>
                     </ul>
                   </div>
                   <div className="score-card full muted-card">

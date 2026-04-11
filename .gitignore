@@ -2,3 +2,6 @@ node_modules
 dist
 *.tsbuildinfo
 .vite
+.vercel
+vite.config.js
+vite.config.d.ts
