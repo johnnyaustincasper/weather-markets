@@ -2,6 +2,22 @@ export type Signal = 'bullish' | 'bearish' | 'neutral';
 
 export type MarketDataOrigin = 'polymarket-live' | 'curated-watchlist';
 
+export type WeatherResolutionKind = 'precipitation' | 'temperatureMax' | 'windSpeed' | 'namedStorm' | 'unknown';
+
+export type ResolutionSchema = {
+  kind: WeatherResolutionKind;
+  metric: string;
+  operator: 'gte' | 'lte' | 'between' | 'occurs' | 'unknown';
+  threshold?: number | null;
+  thresholdHigh?: number | null;
+  units?: string;
+  location?: string;
+  observationWindow?: string;
+  source?: string;
+  rawRule: string;
+  parseConfidence: number;
+};
+
 export type ForecastSource = {
   name: string;
   probability: number;
@@ -13,12 +29,20 @@ export type ForecastSource = {
 
 export type ForecastHeuristicDetails = {
   thresholdLabel: string;
-  thresholdValue: number;
+  thresholdValue: number | null;
   observedValue: number | null;
   units: string;
   weatherScore: number;
   recencyScore: number;
   sourceAgreement: number;
+};
+
+export type DiscoveryInfo = {
+  hasExchangeContract: boolean;
+  matchedVia: 'live-market' | 'watchlist-fallback';
+  parseConfidence: number;
+  canonicalQuery: string;
+  schemaLabel: string;
 };
 
 export type WeatherMarket = {
@@ -46,6 +70,9 @@ export type WeatherMarket = {
   heuristicSummary: string;
   heuristicDetails: ForecastHeuristicDetails;
   sources: ForecastSource[];
+  resolutionSchema: ResolutionSchema;
+  discovery: DiscoveryInfo;
+  marketSlug?: string;
 };
 
 export type MarketFeedMeta = {
@@ -54,6 +81,8 @@ export type MarketFeedMeta = {
   usedCuratedFallback: boolean;
   refreshedAt: string;
   weatherSourceMix: string[];
+  livePolymarketParsedCount: number;
+  livePolymarketParsedTitles: string[];
 };
 
 export type WeatherMarketResponse = {
