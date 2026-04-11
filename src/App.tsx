@@ -124,7 +124,7 @@ function App() {
                         </div>
                       </td>
                       <td>
-                        <span className={`origin-pill ${market.dataOrigin === 'polymarket-live' ? 'origin-live' : 'origin-fallback'}`}>
+                        <span className={`status-chip ${market.dataOrigin === 'polymarket-live' ? 'tone-good' : 'tone-muted'}`}>
                           {market.dataOrigin === 'polymarket-live' ? 'Live' : 'Fallback'}
                         </span>
                       </td>
