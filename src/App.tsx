@@ -36,6 +36,7 @@ import {
   isFirestorePersistenceEnabled,
   loadPersistentPaperState,
   persistPaperState,
+  type PaperBotBackendStatus,
   type LedgerOwnerIdentity,
   type PaperBotRunAuditEntry,
 } from './services/paperPersistence';
@@ -275,6 +276,7 @@ function App() {
   const [paperOrders, setPaperOrders] = useState<Record<string, PaperOrder[]>>(() => getPaperOrders());
   const [paperBotState, setPaperBotState] = useState<PaperBotLoopState>(() => createPaperBotLoopState({ lastHydratedAt: null, lastPersistedAt: null }));
   const [paperBotRunHistory, setPaperBotRunHistory] = useState<PaperBotRunAuditEntry[]>([]);
+  const [paperBotBackend, setPaperBotBackend] = useState<PaperBotBackendStatus | null>(null);
   const [paperOrderDrafts, setPaperOrderDrafts] = useState<Record<string, { quantity: number; limitPrice: number; note: string }>>({});
   const [paperRepriceMeta, setPaperRepriceMeta] = useState<{ at: string; changedCount: number } | null>(null);
   const [selectedReviewMarketId, setSelectedReviewMarketId] = useState('');
@@ -444,6 +446,7 @@ function App() {
         setPaperOrders(result.state.paperOrders);
         setPaperBotState(createPaperBotLoopState(result.state.botState));
         setPaperBotRunHistory(result.state.botRunHistory ?? []);
+        setPaperBotBackend(result.state.backend ?? null);
         setPersistenceStatus({
           mode: 'firestore',
           detail: `Hydrated your Firestore paper ledger (${getFirebaseProjectId()}/${DEFAULT_PAPER_LEDGER_ID}) for ${ledgerOwner.email ?? ledgerOwner.uid}.`,
@@ -529,6 +532,7 @@ function App() {
     if (!markets.length) return;
 
     const now = new Date().toISOString();
+    const runnerId = ledgerOwner?.uid ?? `ui-${DEFAULT_PAPER_LEDGER_ID}`;
     const result = runPaperBotTick({
       state: {
         version: 1,
@@ -546,7 +550,7 @@ function App() {
         source: persistenceStatus.mode,
       },
       markets,
-      ownerId: `ui-${DEFAULT_PAPER_LEDGER_ID}`,
+      ownerId: runnerId,
       now,
     });
 
@@ -559,7 +563,7 @@ function App() {
     setPaperBotRunHistory((current) => {
       const entry: PaperBotRunAuditEntry = {
         runAt: now,
-        runnerId: `ui-${DEFAULT_PAPER_LEDGER_ID}`,
+        runnerId,
         status: 'ok',
         summary: result.summary,
         marketCount: markets.length,
@@ -655,6 +659,17 @@ function App() {
     .sort((left, right) => right.consecutiveWouldTradeTicks - left.consecutiveWouldTradeTicks)
     .slice(0, 5), [paperBotRuntime]);
   const latestBotAudit = paperBotRunHistory[0] ?? null;
+  const backendHealthTone = paperBotBackend?.staleStatus === 'stale'
+    ? 'negative'
+    : paperBotBackend?.staleStatus === 'watch'
+      ? undefined
+      : paperBotBackend?.staleStatus === 'fresh'
+        ? 'positive'
+        : undefined;
+  const backendHeartbeatLabel = paperBotBackend?.observedLagMinutes === null || paperBotBackend?.observedLagMinutes === undefined
+    ? '--'
+    : `${paperBotBackend.observedLagMinutes}m`;
+  const backendFailureLabel = paperBotBackend?.consecutiveFailures ? String(paperBotBackend.consecutiveFailures) : '0';
   const allPaperOrders = useMemo(() => Object.values(paperOrders).flat(), [paperOrders]);
   const allFilledOrders = useMemo(() => allPaperOrders.filter((order) => order.filledQuantity > 0), [allPaperOrders]);
   const openBlotterEntries = useMemo(() => Object.values(paperBlotter)
@@ -1447,6 +1462,8 @@ function App() {
             <ExecutionSummaryCard label="Ticks" value={String(paperBotState.tickCount)} detail={`Cadence ${getPaperBotCadenceLabel(paperBotState.cadenceMs)}`} />
             <ExecutionSummaryCard label="Next due" value={paperBotState.nextDueAt ? formatClock(paperBotState.nextDueAt) : '--'} detail={paperBotState.nextDueAt ? formatDateTime(paperBotState.nextDueAt) : 'Bot is paused.'} />
             <ExecutionSummaryCard label="Latest audit" value={latestBotAudit ? formatClock(latestBotAudit.runAt) : '--'} detail={latestBotAudit ? `${latestBotAudit.actionCount} actions, ${latestBotAudit.staleMarketCount} stale inputs` : 'No durable run record yet.'} toneClass={latestBotAudit ? 'positive' : undefined} />
+            <ExecutionSummaryCard label="Backend heartbeat" value={backendHeartbeatLabel} detail={paperBotBackend?.staleReason ?? 'No backend heartbeat recorded yet.'} toneClass={backendHealthTone} />
+            <ExecutionSummaryCard label="Backend failures" value={backendFailureLabel} detail={paperBotBackend?.lastError ?? paperBotBackend?.lastRunSummary ?? 'No backend failure recorded.'} toneClass={paperBotBackend?.consecutiveFailures ? 'negative' : undefined} />
           </div>
           <div className="review-diagnostics-grid after-action-grid">
             <div className="intel-card">
@@ -1463,6 +1480,7 @@ function App() {
                         <span className={`status-pill tone-${run.status === 'ok' ? 'good' : 'bad'}`}>{run.source === 'backend' ? 'Backend tick' : 'UI tick'}</span>
                       </div>
                       <p>{run.summary}</p>
+                      {run.source === 'backend' && paperBotBackend?.runner ? <p className="subtle">Runner {paperBotBackend.runner}{paperBotBackend.lastRunOk === false && paperBotBackend.lastFailureAt === run.runAt ? `, failed ${paperBotBackend.consecutiveFailures} time${paperBotBackend.consecutiveFailures === 1 ? '' : 's'} in a row` : ''}.</p> : null}
                     </div>
                     <div className="source-metrics">
                       <small>{run.actionCount} actions</small>
@@ -1499,6 +1517,22 @@ function App() {
                     </div>
                   </div>
                 ))}
+                {paperBotBackend ? (
+                  <div className="stack-row review-row">
+                    <div>
+                      <div className="source-title-row">
+                        <strong>Backend runtime</strong>
+                        <span className={`status-pill ${paperBotBackend.staleStatus === 'stale' ? 'tone-bad' : paperBotBackend.staleStatus === 'watch' ? 'tone-warn' : paperBotBackend.staleStatus === 'fresh' ? 'tone-good' : 'tone-muted'}`}>{paperBotBackend.staleStatus.toUpperCase()}</span>
+                      </div>
+                      <p>{paperBotBackend.staleReason ?? 'Backend status metadata is present but did not include a runtime note.'}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>{paperBotBackend.runner ?? 'runner?'}</small>
+                      <small>{paperBotBackend.lastRunAt ? formatDateTime(paperBotBackend.lastRunAt) : 'no run yet'}</small>
+                      <small>{paperBotBackend.lastQueuedCount} queued / {paperBotBackend.lastActiveCount} active</small>
+                    </div>
+                  </div>
+                ) : null}
                 {paperBotSupervision.alerts.map((alert) => (
                   <div className="stack-row review-row" key={alert.title}>
                     <div>

@@ -201,19 +201,40 @@ const locationCatalog: LocationGuess[] = [
   { label: 'Portland', latitude: 45.5152, longitude: -122.6784, aliases: ['portland'], specificity: 'city' },
 ];
 
-const FETCH_TIMEOUT_MS = 12_000;
+const POLYMARKET_FETCH_TIMEOUT_MS = 8_000;
+const WEATHER_FETCH_TIMEOUT_MS = 4_500;
+const BOT_MARKET_NORMALIZE_CONCURRENCY = 4;
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(url: string, timeoutMs = POLYMARKET_FETCH_TIMEOUT_MS): Promise<T> {
   const response = await fetch(url, {
     headers: {
       Accept: 'application/json',
       'User-Agent': userAgent,
     },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!response.ok) throw new Error(`Request failed: ${response.status} ${response.statusText}`);
   return response.json() as Promise<T>;
+}
+
+async function mapWithConcurrency<TInput, TOutput>(items: TInput[], concurrency: number, mapper: (item: TInput, index: number) => Promise<TOutput>): Promise<TOutput[]> {
+  if (!items.length) return [];
+
+  const safeConcurrency = Math.max(1, Math.min(concurrency, items.length));
+  const results = new Array<TOutput>(items.length);
+  let nextIndex = 0;
+
+  const worker = async () => {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  };
+
+  await Promise.all(Array.from({ length: safeConcurrency }, () => worker()));
+  return results;
 }
 
 function parseStringArray(value?: string): string[] {
@@ -740,58 +761,48 @@ function liveMatchConfidenceFrom(discovery: WeatherDiscoveryAssessment, schema: 
 }
 
 async function getPolymarketSnapshot(): Promise<{ items: FlattenedEventMarket[]; meta: Pick<MarketFeedMeta, 'livePolymarketWeatherCount' | 'totalPolymarketMarketsScanned' | 'livePolymarketParsedCount' | 'livePolymarketParsedTitles' | 'livePolymarketEventCount'> }> {
-  try {
-    const [weatherTaggedEvents, generalEvents] = await Promise.all([
-      fetchJson<PolymarketEvent[]>(polymarketEventsUrl),
-      fetchJson<PolymarketEvent[]>(polymarketGeneralEventsUrl),
-    ]);
+  const [weatherTaggedResult, generalResult] = await Promise.allSettled([
+    fetchJson<PolymarketEvent[]>(polymarketEventsUrl, POLYMARKET_FETCH_TIMEOUT_MS),
+    fetchJson<PolymarketEvent[]>(polymarketGeneralEventsUrl, POLYMARKET_FETCH_TIMEOUT_MS),
+  ]);
 
-    const taggedItems = weatherTaggedEvents.flatMap((event) => (event.markets ?? []).map((market) => ({ event, market })));
-    const discoveredItems = generalEvents
-      .flatMap((event) => (event.markets ?? []).map((market) => ({ event, market })))
-      .filter(isWeatherLikeEvent);
+  const weatherTaggedEvents = weatherTaggedResult.status === 'fulfilled' ? weatherTaggedResult.value : [];
+  const generalEvents = generalResult.status === 'fulfilled' ? generalResult.value : [];
+  const taggedItems = weatherTaggedEvents.flatMap((event) => (event.markets ?? []).map((market) => ({ event, market })));
+  const discoveredItems = generalEvents
+    .flatMap((event) => (event.markets ?? []).map((market) => ({ event, market })))
+    .filter(isWeatherLikeEvent);
 
-    const deduped = new Map<string, FlattenedEventMarket>();
-    [...taggedItems, ...discoveredItems].forEach((item) => {
-      deduped.set(item.market.id, item);
-    });
+  const deduped = new Map<string, FlattenedEventMarket>();
+  [...taggedItems, ...discoveredItems].forEach((item) => {
+    deduped.set(item.market.id, item);
+  });
 
-    const items = [...deduped.values()]
-      .map((item) => ({ item, assessment: assessWeatherDiscovery(item) }))
-      .filter(({ assessment }) => assessment.include)
-      .sort((left, right) => right.assessment.score - left.assessment.score)
-      .map(({ item }) => item);
-    const parsedItems = items.filter((item) => parseResolutionSchema(item).parseConfidence >= 0.45);
-    return {
-      items,
-      meta: {
-        livePolymarketWeatherCount: items.length,
-        totalPolymarketMarketsScanned: taggedItems.length + generalEvents.flatMap((event) => event.markets ?? []).length,
-        livePolymarketParsedCount: parsedItems.length,
-        livePolymarketParsedTitles: parsedItems.slice(0, 5).map((item) => item.market.question),
-        livePolymarketEventCount: new Set(items.map((item) => item.event.id)).size,
-      },
-    };
-  } catch {
-    return {
-      items: [],
-      meta: {
-        livePolymarketWeatherCount: 0,
-        totalPolymarketMarketsScanned: 0,
-        livePolymarketParsedCount: 0,
-        livePolymarketParsedTitles: [],
-        livePolymarketEventCount: 0,
-      },
-    };
-  }
+  const items = [...deduped.values()]
+    .map((item) => ({ item, assessment: assessWeatherDiscovery(item) }))
+    .filter(({ assessment }) => assessment.include)
+    .sort((left, right) => right.assessment.score - left.assessment.score)
+    .map(({ item }) => item);
+  const parsedItems = items.filter((item) => parseResolutionSchema(item).parseConfidence >= 0.45);
+
+  return {
+    items,
+    meta: {
+      livePolymarketWeatherCount: items.length,
+      totalPolymarketMarketsScanned: taggedItems.length + generalEvents.flatMap((event) => event.markets ?? []).length,
+      livePolymarketParsedCount: parsedItems.length,
+      livePolymarketParsedTitles: parsedItems.slice(0, 5).map((item) => item.market.question),
+      livePolymarketEventCount: new Set(items.map((item) => item.event.id)).size,
+    },
+  };
 }
 
 async function getNwsHourly(latitude: number, longitude: number): Promise<NwsHourlyResponse | null> {
   try {
-    const points = await fetchJson<NwsPointsResponse>(`https://api.weather.gov/points/${latitude},${longitude}`);
+    const points = await fetchJson<NwsPointsResponse>(`https://api.weather.gov/points/${latitude},${longitude}`, WEATHER_FETCH_TIMEOUT_MS);
     const hourlyUrl = points.properties?.forecastHourly;
     if (!hourlyUrl) return null;
-    return fetchJson<NwsHourlyResponse>(hourlyUrl);
+    return fetchJson<NwsHourlyResponse>(hourlyUrl, WEATHER_FETCH_TIMEOUT_MS);
   } catch {
     return null;
   }
@@ -799,7 +810,7 @@ async function getNwsHourly(latitude: number, longitude: number): Promise<NwsHou
 
 async function getOpenMeteo(latitude: number, longitude: number): Promise<OpenMeteoResponse | null> {
   try {
-    return await fetchJson<OpenMeteoResponse>(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&hourly=precipitation_probability,temperature_2m,wind_speed_10m&forecast_days=3&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch`);
+    return await fetchJson<OpenMeteoResponse>(`https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&hourly=precipitation_probability,temperature_2m,wind_speed_10m&forecast_days=3&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch`, WEATHER_FETCH_TIMEOUT_MS);
   } catch {
     return null;
   }
@@ -1186,7 +1197,7 @@ function isTrustworthyLiveMarket(market: WeatherMarket) {
 
 export async function getWeatherMarkets(): Promise<WeatherMarketResponse> {
   const polymarket = await getPolymarketSnapshot();
-  const markets = await Promise.all(polymarket.items.map((item) => normalizeEventMarket(item)));
+  const markets = await mapWithConcurrency(polymarket.items, BOT_MARKET_NORMALIZE_CONCURRENCY, (item) => normalizeEventMarket(item));
   markets.sort((a, b) => Math.abs(b.edge) * b.confidence - Math.abs(a.edge) * a.confidence);
 
   const qualifiedMarkets = markets.filter((market) => isTrustworthyLiveMarket(market));
