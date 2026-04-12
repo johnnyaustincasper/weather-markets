@@ -1,7 +1,8 @@
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
 import { getFirestoreDb, getFirebaseProjectId, isFirebaseConfigured } from '../lib/firebase';
 import type { PaperBlotterEntry } from './paperBlotter';
-import { DEFAULT_PAPER_EXECUTION_SETTINGS, type PaperExecutionProfile } from './paperExecutionSettings';
+import { createPaperBotLoopState, type PaperBotLoopState } from './paperBotLoop';
+import { DEFAULT_PAPER_EXECUTION_SETTINGS, sanitizePaperExecutionSettings, type PaperExecutionProfile } from './paperExecutionSettings';
 import type { PaperOrder } from './paperOrders';
 import type { PaperPositionState } from './paperTrading';
 
@@ -18,11 +19,7 @@ export type PersistentPaperState = {
   paperExecutionProfile: PaperExecutionProfile;
   paperBlotter: Record<string, PaperBlotterEntry>;
   paperOrders: Record<string, PaperOrder[]>;
-  botState: {
-    mode: 'paper';
-    lastHydratedAt: string | null;
-    lastPersistedAt: string | null;
-  };
+  botState: PaperBotLoopState;
   syncedAt: string;
   source: 'local' | 'firestore';
 };
@@ -58,20 +55,27 @@ function writeJson(key: string, value: unknown) {
 }
 
 function sanitizeState(input: Partial<PersistentPaperState>): PersistentPaperState {
+  const rawExecutionProfile = input.paperExecutionProfile && typeof input.paperExecutionProfile === 'object'
+    ? input.paperExecutionProfile as Partial<PaperExecutionProfile>
+    : null;
+
   return {
     version: 1,
     watchIds: Array.isArray(input.watchIds) ? input.watchIds.filter((value): value is string => typeof value === 'string') : [],
     paperState: input.paperState && typeof input.paperState === 'object' ? input.paperState : {},
-    paperExecutionProfile: input.paperExecutionProfile && typeof input.paperExecutionProfile === 'object'
-      ? input.paperExecutionProfile as PaperExecutionProfile
-      : { global: DEFAULT_PAPER_EXECUTION_SETTINGS, perMarket: {} },
+    paperExecutionProfile: {
+      global: sanitizePaperExecutionSettings(rawExecutionProfile?.global ?? DEFAULT_PAPER_EXECUTION_SETTINGS),
+      perMarket: Object.fromEntries(
+        Object.entries(rawExecutionProfile?.perMarket ?? {}).map(([marketId, value]) => [marketId, sanitizePaperExecutionSettings(value)]),
+      ),
+    },
     paperBlotter: input.paperBlotter && typeof input.paperBlotter === 'object' ? input.paperBlotter : {},
     paperOrders: input.paperOrders && typeof input.paperOrders === 'object' ? input.paperOrders : {},
-    botState: {
-      mode: 'paper',
+    botState: createPaperBotLoopState({
+      ...input.botState,
       lastHydratedAt: input.botState?.lastHydratedAt ?? null,
       lastPersistedAt: input.botState?.lastPersistedAt ?? null,
-    },
+    }),
     syncedAt: typeof input.syncedAt === 'string' ? input.syncedAt : new Date().toISOString(),
     source: input.source === 'firestore' ? 'firestore' : 'local',
   };
@@ -85,7 +89,7 @@ export function readPersistentPaperState(): PersistentPaperState {
     paperExecutionProfile: readJson(LOCAL_STORAGE_KEYS.paperExecutionProfile, { global: DEFAULT_PAPER_EXECUTION_SETTINGS, perMarket: {} }),
     paperBlotter: readJson(LOCAL_STORAGE_KEYS.paperBlotter, {}),
     paperOrders: readJson(LOCAL_STORAGE_KEYS.paperOrders, {}),
-    botState: { mode: 'paper', lastHydratedAt: null, lastPersistedAt: null },
+    botState: createPaperBotLoopState({ lastHydratedAt: null, lastPersistedAt: null }),
     source: 'local',
   });
 }
@@ -119,7 +123,7 @@ export async function loadPersistentPaperState(ledgerId = DEFAULT_PAPER_LEDGER_I
 
 let saveTimer: number | null = null;
 
-export function persistPaperState(state: PersistentPaperState, ledgerId = DEFAULT_PAPER_LEDGER_ID) {
+export function persistPaperState(state: Partial<PersistentPaperState>, ledgerId = DEFAULT_PAPER_LEDGER_ID) {
   const nextState = sanitizeState(state);
   writePersistentPaperState(nextState);
 

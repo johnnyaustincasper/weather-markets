@@ -389,6 +389,14 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .source-metrics { text-align: right; display: grid; gap: 8px; font-weight: 600; }
 
 .after-action-grid { align-items: start; }
+.portfolio-panel .review-metrics { margin-bottom: 14px; }
+.exposure-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+.exposure-alert-stack { margin-top: 12px; }
 .review-selector-list { margin-top: 10px; }
 .review-selector {
   width: 100%;
@@ -435,7 +443,8 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
   .signal-strip,
   .tuning-grid,
   .footer-strip,
-  .workflow-lane-grid { grid-template-columns: 1fr; }
+  .workflow-lane-grid,
+  .exposure-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {

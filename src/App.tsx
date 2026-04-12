@@ -31,6 +31,7 @@ import {
   loadPersistentPaperState,
   persistPaperState,
 } from './services/paperPersistence';
+import { createPaperBotLoopState } from './services/paperBotLoop';
 import { getFirebaseProjectId } from './lib/firebase';
 import type { MarketFeedMeta, QuoteStatus, WeatherMarket } from './types';
 
@@ -98,6 +99,21 @@ type WorkflowStage = {
 };
 
 type CommandAction = {
+  title: string;
+  detail: string;
+  tone: AlertTone | 'muted';
+};
+
+type ExposureBucket = {
+  key: string;
+  label: string;
+  units: number;
+  markets: number;
+  active: number;
+  queued: number;
+};
+
+type DeskAlert = {
   title: string;
   detail: string;
   tone: AlertTone | 'muted';
@@ -204,6 +220,12 @@ const buildMarketAlerts = (current: WeatherMarket, previous: WeatherMarket | und
   }
 
   return { edgeDelta, confidenceDelta, freshnessDelta, status, alerts };
+};
+
+const directionLabel = (direction: 'buy-yes' | 'buy-no' | 'stand-aside') => {
+  if (direction === 'buy-yes') return 'YES';
+  if (direction === 'buy-no') return 'NO';
+  return 'Flat';
 };
 
 function App() {
@@ -372,11 +394,10 @@ function App() {
             paperExecutionProfile,
             paperBlotter,
             paperOrders,
-            botState: {
-              mode: 'paper',
+            botState: createPaperBotLoopState({
               lastHydratedAt: new Date().toISOString(),
               lastPersistedAt: null,
-            },
+            }),
             syncedAt: new Date().toISOString(),
             source: 'local',
           }, DEFAULT_PAPER_LEDGER_ID);
@@ -447,6 +468,110 @@ function App() {
   const selectedHistory = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
   const paperPerformance = useMemo(() => summarizePaperPerformance(paperBlotter), [paperBlotter]);
+  const exposureSummary = useMemo(() => {
+    const tracked = displayMarkets
+      .map((market) => {
+        const state = paperState[market.id]?.state;
+        if (state !== 'active' && state !== 'queued') return null;
+
+        const plan = paperPlans[market.id];
+        const orders = paperOrders[market.id] ?? [];
+        const filledUnits = orders.reduce((sum, order) => sum + order.filledQuantity, 0);
+        const workingUnits = orders
+          .filter((order) => order.status === 'working' || order.status === 'partial')
+          .reduce((sum, order) => sum + order.remainingQuantity, 0);
+        const suggestedUnits = plan?.sizing.suggestedUnits ?? 0;
+        const units = state === 'active'
+          ? Math.max(filledUnits, suggestedUnits || 1)
+          : Math.max(workingUnits, suggestedUnits || 1);
+
+        return {
+          marketId: market.id,
+          title: market.title,
+          state,
+          direction: plan?.direction ?? 'stand-aside',
+          location: market.location,
+          setupType: market.resolutionSchema.kind,
+          units,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+    const sumUnits = (items: typeof tracked) => items.reduce((sum, item) => sum + item.units, 0);
+    const active = tracked.filter((item) => item.state === 'active');
+    const queued = tracked.filter((item) => item.state === 'queued');
+    const yesUnits = sumUnits(tracked.filter((item) => item.direction === 'buy-yes'));
+    const noUnits = sumUnits(tracked.filter((item) => item.direction === 'buy-no'));
+    const grossUnits = sumUnits(tracked);
+    const netBiasUnits = yesUnits - noUnits;
+
+    const buildBuckets = (items: typeof tracked, getKey: (item: typeof tracked[number]) => string, getLabel: (item: typeof tracked[number]) => string) => {
+      const buckets = new Map<string, ExposureBucket>();
+      for (const item of items) {
+        const key = getKey(item);
+        const existing = buckets.get(key) ?? { key, label: getLabel(item), units: 0, markets: 0, active: 0, queued: 0 };
+        existing.units += item.units;
+        existing.markets += 1;
+        if (item.state === 'active') existing.active += item.units;
+        if (item.state === 'queued') existing.queued += item.units;
+        buckets.set(key, existing);
+      }
+      return Array.from(buckets.values()).sort((left, right) => right.units - left.units).slice(0, 4);
+    };
+
+    const byLocation = buildBuckets(tracked, (item) => item.location, (item) => item.location);
+    const bySetup = buildBuckets(tracked, (item) => item.setupType, (item) => setupTypeLabel(item.setupType));
+    const byDirection = buildBuckets(tracked, (item) => item.direction, (item) => `${directionLabel(item.direction)} bias`);
+    const topLocation = byLocation[0];
+    const topSetup = bySetup[0];
+
+    const alerts: DeskAlert[] = [];
+    if (!tracked.length) {
+      alerts.push({ title: 'No desk risk on', detail: 'Nothing is queued or active, so the board is clean for the next setup.', tone: 'muted' });
+    }
+    if (grossUnits > 0 && topLocation && topLocation.units / grossUnits >= 0.5) {
+      alerts.push({ title: 'Location concentration high', detail: `${topLocation.label} holds ${topLocation.units} of ${grossUnits} tracked units. Add a second city or cut size before stacking more there.`, tone: 'warn' });
+    }
+    if (grossUnits > 0 && Math.max(yesUnits, noUnits) / grossUnits >= 0.75) {
+      const dominantSide = yesUnits >= noUnits ? 'YES' : 'NO';
+      alerts.push({ title: `${dominantSide} bias is crowded`, detail: `${dominantSide} exposure controls ${Math.max(yesUnits, noUnits)} of ${grossUnits} tracked units, so one weather regime could hit most of the book together.`, tone: 'warn' });
+    }
+    if (queued.length >= 3 && active.length === 0) {
+      alerts.push({ title: 'Queue is building without fills', detail: `${queued.length} setups are staged but none are active. Either improve limits or trim stale tickets so attention stays sharp.`, tone: 'bad' });
+    }
+    if (topSetup && topSetup.units >= Math.max(6, grossUnits * 0.45)) {
+      alerts.push({ title: 'Setup-type clustering', detail: `${topSetup.label} is carrying the biggest stack. Make sure the desk is not just replaying one weather pattern.`, tone: 'warn' });
+    }
+
+    const nextSteps: CommandAction[] = tracked.length
+      ? [
+          topLocation
+            ? { title: 'Check city concentration', detail: `${topLocation.label} is the biggest exposure pocket at ${topLocation.units} units across ${topLocation.markets} markets.`, tone: topLocation.units / Math.max(grossUnits, 1) >= 0.5 ? 'warn' : 'muted' }
+            : { title: 'City balance looks clean', detail: 'No single location dominates the desk yet.', tone: 'good' },
+          Math.abs(netBiasUnits) >= Math.max(3, grossUnits * 0.35)
+            ? { title: `Bias hedge needed`, detail: `Net ${netBiasUnits > 0 ? 'long YES' : 'long NO'} by ${Math.abs(netBiasUnits)} units. Prefer the opposite side on the next valid setup.`, tone: 'warn' }
+            : { title: 'Bias is balanced', detail: 'YES and NO exposure are reasonably paired right now.', tone: 'good' },
+          queued.length > active.length
+            ? { title: 'Promote or prune the queue', detail: `${queued.length} queued versus ${active.length} active. Clean up stale staged orders so the queue stays actionable.`, tone: 'warn' }
+            : { title: 'Active book is leading', detail: `${active.length} active positions are being supported by a manageable queue.`, tone: 'good' },
+        ]
+      : [];
+
+    return {
+      tracked,
+      grossUnits,
+      activeUnits: sumUnits(active),
+      queuedUnits: sumUnits(queued),
+      yesUnits,
+      noUnits,
+      netBiasUnits,
+      byLocation,
+      bySetup,
+      byDirection,
+      alerts: alerts.slice(0, 4),
+      nextSteps,
+    };
+  }, [displayMarkets, paperOrders, paperPlans, paperState]);
   const afterActionReviews = useMemo(() => Object.values(paperBlotter)
     .slice()
     .sort((left, right) => new Date(right.closedAt ?? right.lastMarkedAt ?? 0).getTime() - new Date(left.closedAt ?? left.lastMarkedAt ?? 0).getTime())
@@ -1132,6 +1257,81 @@ function App() {
           </div>
         </section>
 
+        <section className="panel review-panel portfolio-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Desk risk</p>
+              <h2>Portfolio concentration and bias</h2>
+              <p className="subtle panel-intro">The scanner can now show whether your paper book is actually diversified, or if multiple trades are really one weather bet wearing different labels.</p>
+            </div>
+            <div className="table-actions">
+              <span className="badge soft">{exposureSummary.grossUnits} tracked units</span>
+              <span className="badge soft">{exposureSummary.tracked.length} live campaigns</span>
+            </div>
+          </div>
+
+          <div className="execution-summary-grid review-metrics">
+            <ExecutionSummaryCard label="Active risk" value={`${exposureSummary.activeUnits}u`} detail={`${exposureSummary.tracked.filter((item) => item.state === 'active').length} active campaigns`} />
+            <ExecutionSummaryCard label="Queued risk" value={`${exposureSummary.queuedUnits}u`} detail={`${exposureSummary.tracked.filter((item) => item.state === 'queued').length} queued campaigns`} />
+            <ExecutionSummaryCard label="YES vs NO" value={`${exposureSummary.yesUnits}u / ${exposureSummary.noUnits}u`} detail="Gross directional split across the paper desk." />
+            <ExecutionSummaryCard label="Net bias" value={exposureSummary.netBiasUnits === 0 ? 'Flat' : `${exposureSummary.netBiasUnits > 0 ? '+' : ''}${exposureSummary.netBiasUnits}u`} detail={exposureSummary.netBiasUnits > 0 ? 'Desk leans YES.' : exposureSummary.netBiasUnits < 0 ? 'Desk leans NO.' : 'Desk is balanced.'} toneClass={exposureSummary.netBiasUnits === 0 ? undefined : exposureSummary.netBiasUnits > 0 ? 'positive' : 'negative'} />
+          </div>
+
+          <div className="review-diagnostics-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Concentration map</span>
+                  <p className="subtle">Top exposure pockets by city, setup type, and side.</p>
+                </div>
+              </div>
+
+              <div className="exposure-grid">
+                <ExposureColumn title="By city" buckets={exposureSummary.byLocation} />
+                <ExposureColumn title="By setup" buckets={exposureSummary.bySetup} />
+                <ExposureColumn title="By bias" buckets={exposureSummary.byDirection} />
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Desk actions</span>
+                  <p className="subtle">What the portfolio shape suggests you should do next.</p>
+                </div>
+              </div>
+
+              <div className="stack-list compact-review-list">
+                {exposureSummary.nextSteps.length ? exposureSummary.nextSteps.map((item) => (
+                  <div className="stack-row review-row" key={item.title}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{item.title}</strong>
+                        <span className={`status-pill tone-${item.tone}`}>{item.tone === 'good' ? 'Healthy' : item.tone === 'warn' ? 'Adjust' : 'Watch'}</span>
+                      </div>
+                      <p>{item.detail}</p>
+                    </div>
+                  </div>
+                )) : <p className="subtle">Queue or activate a trade to start monitoring desk-level concentration.</p>}
+              </div>
+
+              <div className="stack-list compact-review-list exposure-alert-stack">
+                {exposureSummary.alerts.map((alert) => (
+                  <div className="stack-row review-row" key={alert.title}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{alert.title}</strong>
+                        <span className={`status-pill tone-${alert.tone}`}>{alert.tone === 'bad' ? 'Attention' : alert.tone === 'warn' ? 'Risk' : 'Clear'}</span>
+                      </div>
+                      <p>{alert.detail}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="panel review-panel">
           <div className="panel-header">
             <div>
@@ -1517,6 +1717,28 @@ function ExecutionSummaryCard({ label, value, detail, toneClass }: { label: stri
       <span>{label}</span>
       <strong className={toneClass ?? ''}>{value}</strong>
       <p>{detail}</p>
+    </div>
+  );
+}
+
+function ExposureColumn({ title, buckets }: { title: string; buckets: ExposureBucket[] }) {
+  return (
+    <div className="stack-list compact-review-list">
+      <div className="source-title-row review-list-header">
+        <strong>{title}</strong>
+        <span className="status-pill tone-muted">{buckets.length}</span>
+      </div>
+      {buckets.length ? buckets.map((bucket) => (
+        <div className="stack-row review-row" key={bucket.key}>
+          <div>
+            <div className="source-title-row">
+              <strong>{bucket.label}</strong>
+              <span className="status-pill tone-muted">{bucket.units}u</span>
+            </div>
+            <p>{bucket.markets} market{bucket.markets > 1 ? 's' : ''} · {bucket.active}u active · {bucket.queued}u queued</p>
+          </div>
+        </div>
+      )) : <p className="subtle">No tracked exposure yet.</p>}
     </div>
   );
 }

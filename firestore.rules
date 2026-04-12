@@ -1,8 +1,27 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isLedgerOwner() {
+      return signedIn()
+        && resource != null
+        && resource.data.ownerUid is string
+        && resource.data.ownerUid == request.auth.uid;
+    }
+
+    function isCreatingOwnLedger() {
+      return signedIn()
+        && request.resource != null
+        && request.resource.data.ownerUid is string
+        && request.resource.data.ownerUid == request.auth.uid;
+    }
+
     match /paperTradeLedgers/{ledgerId} {
-      allow read, write: if false;
+      allow create: if isCreatingOwnLedger();
+      allow read, update, delete: if isLedgerOwner();
     }
   }
 }
