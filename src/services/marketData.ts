@@ -5,6 +5,13 @@ type MarketProvider = {
   getQuoteUpdates: () => Promise<MarketQuoteUpdate[]>;
 };
 
+type PolymarketTag = {
+  id?: string;
+  label?: string;
+  slug?: string;
+  name?: string;
+};
+
 type PolymarketEvent = {
   id: string;
   slug: string;
@@ -14,6 +21,7 @@ type PolymarketEvent = {
   liquidity?: number | string;
   volume24hr?: number | string;
   updatedAt?: string;
+  tags?: PolymarketTag[];
   markets?: PolymarketMarket[];
 };
 
@@ -101,6 +109,12 @@ type EventScoringProfile = {
   summary: string;
 };
 
+type WeatherDiscoveryAssessment = {
+  include: boolean;
+  score: number;
+  reasons: string[];
+};
+
 const polymarketEventsUrl = 'https://gamma-api.polymarket.com/events?tag_slug=weather&limit=100&active=true&closed=false';
 const polymarketGeneralEventsUrl = 'https://gamma-api.polymarket.com/events?limit=500&active=true&closed=false';
 const userAgent = 'weather-markets-scanner/0.5';
@@ -108,8 +122,21 @@ const WEATHER_DISCOVERY_KEYWORDS = [
   'weather', 'temperature', 'hottest', 'heat', 'rain', 'rainfall', 'precipitation', 'snow', 'snowfall', 'wind', 'gust',
   'hurricane', 'storm', 'tornado', 'arctic sea ice', 'sea ice', 'climate', 'global temperature', 'landfall',
 ];
-const WEATHER_EXCLUSION_KEYWORDS = [
-  'measles', 'earthquake', 'volcano', 'meteor', 'asteroid', 'wildfire', 'bird flu', 'flu', 'covid',
+const HIGH_SIGNAL_WEATHER_TERMS = [
+  'temperature', 'rainfall', 'precipitation', 'snowfall', 'snow', 'wind speed', 'wind gust', 'gust', 'heat index', 'hottest',
+  'sea ice', 'global temperature', 'hurricane', 'tropical storm', 'named storm', 'landfall', 'storm forms',
+];
+const HARD_WEATHER_EXCLUSION_KEYWORDS = [
+  'measles', 'bird flu', 'flu', 'covid', 'pandemic', 'earthquake', 'earthquakes', 'volcano', 'volcanic', 'meteor', 'asteroid', 'wildfire', 'wildfires',
+];
+const SOFT_WEATHER_EXCLUSION_KEYWORDS = [
+  'disease', 'outbreak', 'virus', 'war', 'election', 'stock', 'bitcoin', 'ipo', 'tariff', 'lawsuit', 'earnings',
+];
+const WEATHER_POSITIVE_TAG_SLUGS = [
+  'weather', 'weather-science', 'climate', 'climate-weather', 'hurricane', 'hurricanes', 'global-temp', 'climate-change', 'climate-science',
+];
+const WEATHER_NEGATIVE_TAG_SLUGS = [
+  'measles', 'pandemics', 'earthquakes', 'natural-disasters', 'natural-disaster', 'wildfire', 'wildfires',
 ];
 const now = () => new Date();
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
@@ -257,11 +284,56 @@ function inferObservationWindow(text: string) {
   return match?.[1];
 }
 
-function isWeatherLikeEvent(item: FlattenedEventMarket) {
+function eventTagSlugs(event: PolymarketEvent) {
+  return (event.tags ?? []).map((tag) => normalizeText(tag.slug ?? tag.label ?? tag.name ?? '')).filter(Boolean);
+}
+
+function assessWeatherDiscovery(item: FlattenedEventMarket): WeatherDiscoveryAssessment {
   const haystack = normalizeText(`${item.market.question} ${item.market.description ?? ''} ${item.event.title} ${item.event.description ?? ''}`);
-  const hasKeyword = WEATHER_DISCOVERY_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)));
-  const hasExclusion = WEATHER_EXCLUSION_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)));
-  return hasKeyword && !hasExclusion;
+  const tagSlugs = eventTagSlugs(item.event);
+  let score = 0;
+  const reasons: string[] = [];
+
+  if (WEATHER_DISCOVERY_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)))) {
+    score += 2.2;
+    reasons.push('weather keyword');
+  }
+  if (HIGH_SIGNAL_WEATHER_TERMS.some((keyword) => haystack.includes(normalizeText(keyword)))) {
+    score += 2.4;
+    reasons.push('high-signal weather term');
+  }
+  if (tagSlugs.some((slug) => WEATHER_POSITIVE_TAG_SLUGS.includes(slug))) {
+    score += 1.8;
+    reasons.push('weather tag');
+  }
+  if (/\b(hurricane|tropical storm|named storm)\b/.test(haystack) && /\b(form|forms|landfall|landfalls|make landfall|made landfall)\b/.test(haystack)) {
+    score += 1.6;
+    reasons.push('storm contract wording');
+  }
+  if (/\b(temperature|rainfall|precipitation|snowfall|wind|gust|sea ice|global temperature)\b/.test(haystack) && /\b(at least|less than|more than|between|above|below|under|over|reach|reaches|hits|stays below)\b/.test(haystack)) {
+    score += 1.3;
+    reasons.push('measurable weather rule');
+  }
+
+  if (HARD_WEATHER_EXCLUSION_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)))) {
+    score -= 6;
+    reasons.push('hard exclusion keyword');
+  }
+  if (SOFT_WEATHER_EXCLUSION_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)))) {
+    score -= 1.5;
+    reasons.push('soft exclusion keyword');
+  }
+  if (tagSlugs.some((slug) => WEATHER_NEGATIVE_TAG_SLUGS.includes(slug))) {
+    score -= 3.4;
+    reasons.push('adjacent non-weather tag');
+  }
+
+  const include = score >= 2.5 && !reasons.includes('hard exclusion keyword');
+  return { include, score, reasons };
+}
+
+function isWeatherLikeEvent(item: FlattenedEventMarket) {
+  return assessWeatherDiscovery(item).include;
 }
 
 function parseResolutionSchema(item: FlattenedEventMarket): ResolutionSchema {
@@ -496,6 +568,17 @@ function eventScoringProfile(schema: ResolutionSchema): EventScoringProfile {
   };
 }
 
+function parseQualityBoost(schema: ResolutionSchema) {
+  if (schema.kind === 'temperatureMax' || schema.kind === 'precipitation' || schema.kind === 'windSpeed') return 0.12;
+  if (schema.kind === 'namedStorm') return 0.08;
+  return schema.operator === 'between' ? 0.06 : 0;
+}
+
+function liveMatchConfidenceFrom(discovery: WeatherDiscoveryAssessment, schema: ResolutionSchema, canonicalLocation: string | null) {
+  const locationBoost = canonicalLocation ? 0.08 : 0;
+  return clamp(0.22 + discovery.score / 8 + schema.parseConfidence * 0.45 + parseQualityBoost(schema) + locationBoost, 0.12, 0.99);
+}
+
 async function getPolymarketSnapshot(): Promise<{ items: FlattenedEventMarket[]; meta: Pick<MarketFeedMeta, 'livePolymarketWeatherCount' | 'totalPolymarketMarketsScanned' | 'livePolymarketParsedCount' | 'livePolymarketParsedTitles' | 'livePolymarketEventCount'> }> {
   try {
     const [weatherTaggedEvents, generalEvents] = await Promise.all([
@@ -513,7 +596,11 @@ async function getPolymarketSnapshot(): Promise<{ items: FlattenedEventMarket[];
       deduped.set(item.market.id, item);
     });
 
-    const items = [...deduped.values()];
+    const items = [...deduped.values()]
+      .map((item) => ({ item, assessment: assessWeatherDiscovery(item) }))
+      .filter(({ assessment }) => assessment.include)
+      .sort((left, right) => right.assessment.score - left.assessment.score)
+      .map(({ item }) => item);
     const parsedItems = items.filter((item) => parseResolutionSchema(item).parseConfidence >= 0.45);
     return {
       items,
@@ -701,13 +788,14 @@ function quoteStatusFrom(quote?: ClobQuote): QuoteStatus {
   return 'wide';
 }
 
-function confidenceFrom(edge: number, disagreement: number, freshnessMinutes: number, parseConfidence: number, profile: EventScoringProfile, quote?: ClobQuote) {
+function confidenceFrom(edge: number, disagreement: number, freshnessMinutes: number, parseConfidence: number, profile: EventScoringProfile, quote?: ClobQuote, liveMatchConfidence?: number) {
   const edgeScore = clamp(Math.abs(edge) / 0.25);
   const agreementScore = 1 - clamp(disagreement / 0.4);
   const freshnessScore = 1 - clamp(freshnessMinutes / 720);
   const quoteAgeScore = 1 - clamp(quoteAgeMinutesFrom(quote) / 180);
   const quoteSpreadScore = quoteSpreadScoreFrom(quote);
-  return clamp((edgeScore * 0.28 + agreementScore * 0.2 + freshnessScore * 0.14 + parseConfidence * 0.22 + quoteAgeScore * 0.08 + quoteSpreadScore * 0.08) * profile.confidenceWeight, 0.08, 0.98);
+  const discoveryScore = liveMatchConfidence ?? parseConfidence;
+  return clamp((edgeScore * 0.26 + agreementScore * 0.18 + freshnessScore * 0.13 + parseConfidence * 0.16 + discoveryScore * 0.19 + quoteAgeScore * 0.04 + quoteSpreadScore * 0.04) * profile.confidenceWeight, 0.08, 0.98);
 }
 
 export function applyQuoteRefreshToMarket(market: WeatherMarket, update: MarketQuoteUpdate): WeatherMarket {
@@ -721,7 +809,7 @@ export function applyQuoteRefreshToMarket(market: WeatherMarket, update: MarketQ
     impliedProbability,
   ]);
   const profile = eventScoringProfile(market.resolutionSchema);
-  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, market.discovery.parseConfidence, profile, clobQuote);
+  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, market.discovery.parseConfidence, profile, clobQuote, market.discovery.parseConfidence);
   const recencyScore = 1 - clamp(freshnessMinutes / 720);
   const sourceAgreement = 1 - clamp(disagreement / 0.4);
   const quoteStatus = quoteStatusFrom(clobQuote);
@@ -778,6 +866,7 @@ function discoveryFor(item: FlattenedEventMarket, schema: ResolutionSchema, cano
 }
 
 async function normalizeEventMarket(item: FlattenedEventMarket): Promise<WeatherMarket> {
+  const discoveryAssessment = assessWeatherDiscovery(item);
   const schema = parseResolutionSchema(item);
   const canonicalLocationGuess = guessLocation(`${schema.location ?? ''} ${item.market.question} ${item.event.title}`);
   const canonicalLocation = canonicalLocationGuess?.label ?? null;
@@ -802,7 +891,8 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
   const freshnessMinutes = freshnessCandidates.length ? Math.min(...freshnessCandidates.map(minutesSince)) : 180;
   const disagreement = disagreementFrom([...built.sourceProbabilities, impliedProbability]);
   const clobQuote = clobQuoteFor(item.market);
-  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, schema.parseConfidence, profile, clobQuote);
+  const liveMatchConfidence = liveMatchConfidenceFrom(discoveryAssessment, schema, canonicalLocation);
+  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, schema.parseConfidence, profile, clobQuote, liveMatchConfidence);
   const recencyScore = 1 - clamp(freshnessMinutes / 720);
   const sourceAgreement = 1 - clamp(disagreement / 0.4);
   const outcomes = parseStringArray(item.market.outcomes);
@@ -824,11 +914,11 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
     confidence,
     liquidity: fmtMoney(liquidityNumber(item.market)),
     volume24h: fmtMoney(volumeNumber(item.market)),
-    notes: `Discovered from weather-tagged Gamma event “${item.event.title}”. Canonical location resolved to ${canonicalLocation ?? 'no confident local point'}, then scored with ${profile.summary.toLowerCase()}`,
+    notes: `Discovered from Gamma event “${item.event.title}” with live weather-match confidence ${fmtPct(liveMatchConfidence)}. Canonical location resolved to ${canonicalLocation ?? 'no confident local point'}, then scored with ${profile.summary.toLowerCase()}`,
     thesis: 'Event-first discovery from Gamma weather events, with canonicalized market-rule parsing before weather-model enrichment.',
     catalysts: ['Gamma weather event updates', 'CLOB price movement', 'Open-Meteo refresh', 'NWS hourly refresh'],
     risks: [
-      canonicalLocation ? 'Canonical location is inferred from market language and may still miss sub-city observation sites.' : 'No reliable canonical location was found, so confidence is capped by parser quality.',
+      canonicalLocation ? 'Canonical location is inferred from market language and may still miss sub-city observation sites.' : 'No reliable canonical location was found, so confidence is capped by parser quality and live-match certainty.',
       schema.kind === 'unknown' ? 'Rule remains partially unparsed, so fallback scoring is intentionally conservative.' : `Scoring currently follows ${built.scoringMode} and should be upgraded with settlement-specific features later.`,
       'Polymarket wording may still hide edge cases in observation windows or exact settlement sources.',
     ],
@@ -875,7 +965,10 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
       },
     ],
     resolutionSchema: schema,
-    discovery: discoveryFor(item, schema, canonicalLocation),
+    discovery: {
+      ...discoveryFor(item, schema, canonicalLocation),
+      parseConfidence: liveMatchConfidence,
+    },
     marketSlug: item.market.slug,
     conditionId: item.market.conditionId,
     clobTokenIds,
