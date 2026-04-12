@@ -117,6 +117,14 @@ type WeatherDiscoveryAssessment = {
   matchStrength: 'strong' | 'moderate' | 'weak';
 };
 
+type ForecastSupportAssessment = {
+  coverageDays: number | null;
+  horizonGapDays: number | null;
+  status: 'supported' | 'near-limit' | 'unsupported' | 'evergreen';
+  summary: string;
+  actionabilityPenalty: number;
+};
+
 const polymarketEventsUrl = 'https://gamma-api.polymarket.com/events?tag_slug=weather&limit=100&active=true&closed=false';
 const polymarketGeneralEventsUrl = 'https://gamma-api.polymarket.com/events?limit=500&active=true&closed=false';
 const userAgent = 'weather-markets-scanner/0.5';
@@ -598,6 +606,71 @@ function volumeNumber(market: PolymarketMarket) {
   return Number(market.volume24hrClob ?? market.volume24hr) || 0;
 }
 
+function forecastDaysAvailableFor(schema: ResolutionSchema) {
+  if (schema.kind === 'temperatureMax' || schema.kind === 'precipitation' || schema.kind === 'windSpeed') return 3;
+  if (schema.kind === 'namedStorm') return 5;
+  return 0;
+}
+
+function marketEndDateFor(item: FlattenedEventMarket) {
+  return item.market.endDate ?? item.event.endDate ?? null;
+}
+
+function forecastSupportFor(item: FlattenedEventMarket, schema: ResolutionSchema): ForecastSupportAssessment {
+  const coverageDays = forecastDaysAvailableFor(schema);
+  if (coverageDays === 0) {
+    return {
+      coverageDays: null,
+      horizonGapDays: null,
+      status: 'evergreen',
+      summary: 'No short-range forecast qualification applied because this contract is not a near-term local weather setup.',
+      actionabilityPenalty: 0,
+    };
+  }
+
+  const endDate = marketEndDateFor(item);
+  if (!endDate) {
+    return {
+      coverageDays,
+      horizonGapDays: null,
+      status: 'near-limit',
+      summary: `Forecast model supports about ${coverageDays} days, but settlement timing is not explicit in the contract metadata.`,
+      actionabilityPenalty: 0.05,
+    };
+  }
+
+  const hoursToExpiry = (new Date(endDate).getTime() - Date.now()) / 36e5;
+  const horizonGapDays = hoursToExpiry / 24 - coverageDays;
+
+  if (hoursToExpiry <= coverageDays * 24 + 12) {
+    return {
+      coverageDays,
+      horizonGapDays: Math.max(0, horizonGapDays),
+      status: hoursToExpiry <= coverageDays * 24 ? 'supported' : 'near-limit',
+      summary: `Forecast horizon covers this contract through roughly ${Math.max(0, Math.round(hoursToExpiry))}h to expiry.`,
+      actionabilityPenalty: hoursToExpiry <= coverageDays * 24 ? 0 : 0.04,
+    };
+  }
+
+  if (hoursToExpiry <= (coverageDays + 2) * 24) {
+    return {
+      coverageDays,
+      horizonGapDays,
+      status: 'near-limit',
+      summary: `Contract expires about ${Math.round(hoursToExpiry / 24)} days out, slightly beyond the ${coverageDays}-day forecast window.`,
+      actionabilityPenalty: 0.1,
+    };
+  }
+
+  return {
+    coverageDays,
+    horizonGapDays,
+    status: 'unsupported',
+    summary: `Contract expires about ${Math.round(hoursToExpiry / 24)} days out, well beyond the ${coverageDays}-day forecast window used by the model.`,
+    actionabilityPenalty: 0.24,
+  };
+}
+
 function eventScoringProfile(schema: ResolutionSchema): EventScoringProfile {
   if (schema.kind === 'temperatureMax') {
     return {
@@ -938,6 +1011,7 @@ function discoveryFor(item: FlattenedEventMarket, schema: ResolutionSchema, cano
 async function normalizeEventMarket(item: FlattenedEventMarket): Promise<WeatherMarket> {
   const discoveryAssessment = assessWeatherDiscovery(item);
   const schema = parseResolutionSchema(item);
+  const forecastSupport = forecastSupportFor(item, schema);
   const canonicalLocationGuess = guessLocation(`${schema.location ?? ''} ${item.market.question} ${item.event.title}`);
   const canonicalLocation = canonicalLocationGuess?.label ?? null;
   const [openMeteo, nws] = canonicalLocationGuess
@@ -962,7 +1036,11 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
   const disagreement = disagreementFrom([...built.sourceProbabilities, impliedProbability]);
   const clobQuote = clobQuoteFor(item.market);
   const liveMatchConfidence = liveMatchConfidenceFrom(discoveryAssessment, schema, canonicalLocation, clobQuote, item.market);
-  const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, schema.parseConfidence, profile, clobQuote, liveMatchConfidence);
+  const confidence = clamp(
+    confidenceFrom(edge, disagreement, freshnessMinutes, schema.parseConfidence, profile, clobQuote, liveMatchConfidence) - forecastSupport.actionabilityPenalty,
+    0.05,
+    0.98,
+  );
   const recencyScore = 1 - clamp(freshnessMinutes / 720);
   const sourceAgreement = 1 - clamp(disagreement / 0.4);
   const outcomes = parseStringArray(item.market.outcomes);
@@ -984,20 +1062,25 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
     confidence,
     liquidity: fmtMoney(liquidityNumber(item.market)),
     volume24h: fmtMoney(volumeNumber(item.market)),
-    notes: `Discovered from Gamma event “${item.event.title}” with ${discoveryAssessment.matchStrength} live weather-match confidence ${fmtPct(liveMatchConfidence)}. Canonical location resolved to ${canonicalLocation ?? 'no confident local point'}, then scored with ${profile.summary.toLowerCase()}. Discovery signals: ${discoveryAssessment.reasons.slice(0, 4).join(', ')}.`,    thesis: 'Event-first discovery from Gamma weather events, with canonicalized market-rule parsing before weather-model enrichment.',
+    notes: `Discovered from Gamma event “${item.event.title}” with ${discoveryAssessment.matchStrength} live weather-match confidence ${fmtPct(liveMatchConfidence)}. Canonical location resolved to ${canonicalLocation ?? 'no confident local point'}, then scored with ${profile.summary.toLowerCase()}. ${forecastSupport.summary} Discovery signals: ${discoveryAssessment.reasons.slice(0, 4).join(', ')}.`,
+    thesis: 'Event-first discovery from Gamma weather events, with canonicalized market-rule parsing before weather-model enrichment.',
     catalysts: ['Gamma weather event updates', 'CLOB price movement', 'Open-Meteo refresh', 'NWS hourly refresh'],
     risks: [
       canonicalLocation ? 'Canonical location is inferred from market language and may still miss sub-city observation sites.' : 'No reliable canonical location was found, so confidence is capped by parser quality and live-match certainty.',
       schema.kind === 'unknown' ? 'Rule remains partially unparsed, so fallback scoring is intentionally conservative.' : `Scoring currently follows ${built.scoringMode} and should be upgraded with settlement-specific features later.`,
-      'Polymarket wording may still hide edge cases in observation windows or exact settlement sources.',
+      forecastSupport.status === 'unsupported'
+        ? 'This contract sits outside the short-range forecast window, so confidence is penalized and it should be treated as low-actionability.'
+        : forecastSupport.status === 'near-limit'
+          ? 'This contract is near the edge of the forecast window, so confidence is trimmed for horizon risk.'
+          : 'Polymarket wording may still hide edge cases in observation windows or exact settlement sources.',
     ],
     resolution: item.market.description ?? item.event.description ?? 'See Polymarket event description.',
     freshnessMinutes,
     dataOrigin: 'polymarket-event',
     lastUpdated: freshnessCandidates[0] ?? new Date().toISOString(),
-    heuristicSummary: `${fmtPct(impliedProbability)} market price versus ${fmtPct(built.modelProbability)} ${built.scoringMode.replace(/-/g, ' ')} model context for ${displayedLocation}.`,
+    heuristicSummary: `${fmtPct(impliedProbability)} market price versus ${fmtPct(built.modelProbability)} ${built.scoringMode.replace(/-/g, ' ')} model context for ${displayedLocation}. ${forecastSupport.status === 'unsupported' ? 'Forecast support is weak for this timing.' : forecastSupport.status === 'near-limit' ? 'Forecast support is near its limit.' : forecastSupport.status === 'supported' ? 'Forecast support is aligned with timing.' : 'Timing is not forecast-bound.'}`,
     heuristicDetails: {
-      thresholdLabel: `${prettySchema(schema)}${schema.observationWindow ? ` · ${schema.observationWindow}` : ''}`,
+      thresholdLabel: `${prettySchema(schema)}${schema.observationWindow ? ` · ${schema.observationWindow}` : ''}${forecastSupport.coverageDays ? ` · ${forecastSupport.status}` : ''}`,
       thresholdValue: schema.threshold ?? null,
       observedValue: built.observedValue,
       units: schema.units ?? '',
@@ -1063,8 +1146,14 @@ export async function getWeatherMarkets(): Promise<WeatherMarketResponse> {
   const markets = await Promise.all(polymarket.items.map((item) => normalizeEventMarket(item)));
   markets.sort((a, b) => Math.abs(b.edge) * b.confidence - Math.abs(a.edge) * a.confidence);
 
+  const qualifiedMarkets = markets.filter((market) => {
+    if (market.resolutionSchema.kind === 'namedStorm' || market.resolutionSchema.kind === 'unknown') return true;
+    return !market.notes.includes('well beyond the 3-day forecast window used by the model');
+  });
+ 
+
   return {
-    markets,
+    markets: qualifiedMarkets,
     meta: {
       ...polymarket.meta,
       usedCuratedFallback: false,

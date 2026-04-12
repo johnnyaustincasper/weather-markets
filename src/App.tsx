@@ -373,6 +373,32 @@ function App() {
     setPaperOrders(syncPaperOrders(displayMarkets).orders);
   }, [displayMarkets, paperExecutionProfile, paperPlans, paperState]);
 
+  useEffect(() => {
+    const filledOrderMarketIds = Object.entries(paperOrders)
+      .filter(([, orders]) => orders.some((order) => order.filledQuantity > 0 && order.status !== 'cancelled'))
+      .map(([marketId]) => marketId);
+
+    if (!filledOrderMarketIds.length) return;
+
+    setPaperState((current) => {
+      let changed = false;
+      const next = { ...current };
+
+      for (const marketId of filledOrderMarketIds) {
+        const existing = current[marketId];
+        if (existing?.state === 'active' || existing?.state === 'closed') continue;
+        changed = true;
+        next[marketId] = {
+          state: 'active',
+          updatedAt: new Date().toISOString(),
+          note: 'Auto-promoted to active after a local paper fill so exit tracking and review stay attached to the execution path.',
+        };
+      }
+
+      return changed ? next : current;
+    });
+  }, [paperOrders]);
+
   const liveTradeCount = displayMarkets.filter((market) => market.dataOrigin !== 'curated-watchlist' && paperPlans[market.id]?.decision === 'would-trade').length;
   const watchCount = displayMarkets.filter((market) => market.dataOrigin === 'curated-watchlist' || paperPlans[market.id]?.decision === 'watch').length;
   const topTrade = displayMarkets[0];
@@ -459,12 +485,19 @@ function App() {
 
   const closeSelectedMarketForReview = () => {
     if (!selectedMarket) return;
+    const closeReason = selectedBlotter?.exitSuggestion.shouldClose
+      ? `Exit trigger: ${selectedBlotter.exitSuggestion.summary}`
+      : 'Closed manually for review.';
+    const fillContext = selectedLatestFilledOrder
+      ? ` Last average fill was ${pct(selectedLatestFilledOrder.fillPrice ?? selectedLatestFilledOrder.limitPrice)} on ${selectedLatestFilledOrder.filledQuantity}/${selectedLatestFilledOrder.quantity} units.`
+      : '';
+
     setPaperState((current) => ({
       ...current,
       [selectedMarket.id]: {
         state: 'closed',
         updatedAt: new Date().toISOString(),
-        note: 'Closed locally and sent to after-action review.',
+        note: `${closeReason}${fillContext}`,
       },
     }));
     setSelectedReviewMarketId(selectedMarket.id);
@@ -475,8 +508,8 @@ function App() {
   const selectedBlotter = selectedMarket ? paperBlotter[selectedMarket.id] : null;
   const selectedPaperState = selectedMarket ? paperState[selectedMarket.id] : null;
   const selectedOrders = selectedMarket ? (paperOrders[selectedMarket.id] ?? []) : [];
-  const selectedWorkingOrders = selectedOrders.filter((order) => order.status === 'working');
-  const selectedFilledOrders = selectedOrders.filter((order) => order.status === 'filled');
+  const selectedWorkingOrders = selectedOrders.filter((order) => order.status === 'working' || order.status === 'partial');
+  const selectedFilledOrders = selectedOrders.filter((order) => order.filledQuantity > 0);
   const selectedLatestFilledOrder = selectedFilledOrders[0] ?? null;
   const selectedExitReady = Boolean(selectedBlotter?.exitSuggestion.shouldClose);
   const selectedOrderDraft = selectedMarket && selectedPlan
@@ -500,18 +533,18 @@ function App() {
           label: 'Working',
           status: selectedWorkingOrders.length ? `${selectedWorkingOrders.length} live in book` : 'Nothing working',
           detail: selectedWorkingOrders.length
-            ? `Best working ticket is ${selectedWorkingOrders[0].direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} ${selectedWorkingOrders[0].quantity}u @ ${pct(selectedWorkingOrders[0].limitPrice)}.`
-            : 'Stage a paper order to track the queue and watch for a local fill.',
+            ? `Best working ticket is ${selectedWorkingOrders[0].direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} ${selectedWorkingOrders[0].filledQuantity}/${selectedWorkingOrders[0].quantity}u filled at ${pct(selectedWorkingOrders[0].limitPrice)}.`
+            : 'Stage a paper order to track queue priority, partial fills, and local fill realism.',
           tone: selectedWorkingOrders.length ? 'warn' : 'muted',
         },
         {
           key: 'fill',
           label: 'Fill handoff',
-          status: selectedLatestFilledOrder ? `Filled ${selectedLatestFilledOrder.quantity}u @ ${pct(selectedLatestFilledOrder.fillPrice ?? selectedLatestFilledOrder.limitPrice)}` : selectedPaperState?.state === 'active' ? 'Position active' : 'No fill yet',
+          status: selectedLatestFilledOrder ? `Filled ${selectedLatestFilledOrder.filledQuantity}/${selectedLatestFilledOrder.quantity}u @ ${pct(selectedLatestFilledOrder.fillPrice ?? selectedLatestFilledOrder.limitPrice)}` : selectedPaperState?.state === 'active' ? 'Position active' : 'No fill yet',
           detail: selectedPaperState?.state === 'active'
             ? selectedPaperState.note
             : selectedLatestFilledOrder
-              ? 'Local fill detected. Promote this into an active paper trade so exits and review stay synced.'
+              ? 'Local fill detected. Promote this into the active lane so exits, blotter marks, and later review all stay linked.'
               : 'Once a staged order fills, move it into the active lane.',
           tone: selectedPaperState?.state === 'active' ? 'good' : selectedLatestFilledOrder ? 'warn' : 'muted',
           actionLabel: selectedLatestFilledOrder && selectedPaperState?.state !== 'active' ? 'Mark active' : undefined,
@@ -721,7 +754,7 @@ function App() {
                           <span className="badge soft">Ask {quotePct(selectedMarket.clobQuote?.bestAsk)}</span>
                           <span className="badge soft">Bid {quotePct(selectedMarket.clobQuote?.bestBid)}</span>
                           <span className="badge soft">Working {selectedWorkingOrders.length}</span>
-                          <span className="badge soft">Filled {selectedFilledOrders.length}</span>
+                          <span className="badge soft">With fills {selectedFilledOrders.length}</span>
                           <button className="command-button" onClick={handlePlacePaperOrder}>Stage order</button>
                         </div>
                         <div className="stack-list compact-orders">
@@ -729,14 +762,14 @@ function App() {
                             <div className="stack-row" key={order.id}>
                               <div>
                                 <div className="source-title-row">
-                                  <strong>{order.direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} · {order.quantity}u @ {pct(order.limitPrice)}</strong>
-                                  <span className={`status-pill ${order.status === 'filled' ? 'tone-good' : order.status === 'cancelled' ? 'tone-muted' : 'tone-warn'}`}>{order.status.toUpperCase()}</span>
+                                  <strong>{order.direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} · {order.filledQuantity}/{order.quantity}u @ {pct(order.limitPrice)}</strong>
+                                  <span className={`status-pill ${order.status === 'filled' ? 'tone-good' : order.status === 'partial' ? 'tone-warn' : order.status === 'cancelled' ? 'tone-muted' : 'tone-warn'}`}>{order.status.toUpperCase()}</span>
                                 </div>
                                 <p>{order.note}</p>
                               </div>
                               <div className="source-metrics">
                                 <small>{formatDateTime(order.createdAt)}</small>
-                                {order.status === 'working' && <button className="command-button" onClick={() => handleCancelPaperOrder(order.id)}>Cancel</button>}
+                                {(order.status === 'working' || order.status === 'partial') && <button className="command-button" onClick={() => handleCancelPaperOrder(order.id)}>Cancel</button>}
                               </div>
                             </div>
                           )) : <p className="subtle">No paper orders staged yet for this contract.</p>}
@@ -1043,8 +1076,8 @@ function App() {
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Working tickets</span>
-            <strong>{Object.values(paperOrders).flat().filter((order) => order.status === 'working').length} staged</strong>
-            <span className="subtle">{Object.values(paperOrders).flat().find((order) => order.status === 'working')?.marketTitle ?? 'No active paper orders waiting in the book.'}</span>
+            <strong>{Object.values(paperOrders).flat().filter((order) => order.status === 'working' || order.status === 'partial').length} staged</strong>
+            <span className="subtle">{Object.values(paperOrders).flat().find((order) => order.status === 'working' || order.status === 'partial')?.marketTitle ?? 'No active paper orders waiting in the book.'}</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Paper outcomes</span>
