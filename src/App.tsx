@@ -880,6 +880,71 @@ function App() {
             <ExecutionSummaryCard label="Marked PnL" value={signedPct(paperPerformance.totals.totalMarkedPnl)} detail={`${paperPerformance.totals.open} active · ${paperPerformance.totals.queued} queued`} toneClass={paperPerformance.totals.totalMarkedPnl >= 0 ? 'positive' : 'negative'} />
           </div>
 
+          <div className="review-diagnostics-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Fast validation</span>
+                  <p className="subtle">A quicker read on whether the paper engine is showing edge or just noise.</p>
+                </div>
+                <span className="badge soft">{paperPerformance.fastValidation.closedCount} closes</span>
+              </div>
+
+              <div className="execution-summary-grid compact-score-grid">
+                <ExecutionSummaryCard
+                  label="Expectancy / trade"
+                  value={paperPerformance.fastValidation.expectancyPerTrade === null ? '--' : signedPct(paperPerformance.fastValidation.expectancyPerTrade)}
+                  detail={paperPerformance.fastValidation.expectancyLabel}
+                  toneClass={paperPerformance.fastValidation.expectancyPerTrade === null ? undefined : paperPerformance.fastValidation.expectancyPerTrade >= 0 ? 'positive' : 'negative'}
+                />
+                <ExecutionSummaryCard
+                  label="Recent form"
+                  value={paperPerformance.fastValidation.recentForm.sampleSize ? `${paperPerformance.fastValidation.recentForm.wins}-${paperPerformance.fastValidation.recentForm.losses}${paperPerformance.fastValidation.recentForm.flats ? `-${paperPerformance.fastValidation.recentForm.flats}` : ''}` : '--'}
+                  detail={paperPerformance.fastValidation.recentForm.sampleSize ? `${paperPerformance.fastValidation.recentForm.sampleSize} most recent closes.` : 'Need recent closed trades.'}
+                />
+                <ExecutionSummaryCard
+                  label="Current streak"
+                  value={streakLabel(paperPerformance.fastValidation.recentForm.streak.direction, paperPerformance.fastValidation.recentForm.streak.count)}
+                  detail={paperPerformance.fastValidation.recentForm.avgRealizedPnl === null ? 'Need recent closes.' : `Avg ${signedPct(paperPerformance.fastValidation.recentForm.avgRealizedPnl)} over the last tape.`}
+                  toneClass={paperPerformance.fastValidation.recentForm.streak.direction === 'win' ? 'positive' : paperPerformance.fastValidation.recentForm.streak.direction === 'loss' ? 'negative' : undefined}
+                />
+                <ExecutionSummaryCard
+                  label="Recent realized"
+                  value={paperPerformance.fastValidation.recentForm.sampleSize ? signedPct(paperPerformance.fastValidation.recentForm.totalRealizedPnl) : '--'}
+                  detail="Cumulative realized result across the last five closes."
+                  toneClass={paperPerformance.fastValidation.recentForm.totalRealizedPnl >= 0 ? 'positive' : 'negative'}
+                />
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Failure clusters</span>
+                  <p className="subtle">The most repeated ways local paper trades are failing.</p>
+                </div>
+              </div>
+
+              <div className="stack-list compact-review-list">
+                {paperPerformance.fastValidation.failureClusters.length ? paperPerformance.fastValidation.failureClusters.map((cluster) => (
+                  <div className="stack-row review-row" key={cluster.key}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{cluster.label}</strong>
+                        <span className="status-pill tone-bad">{cluster.count} losses</span>
+                      </div>
+                      <p>{cluster.detail}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>Total {signedPct(cluster.totalRealizedPnl)}</small>
+                      <small>Avg {cluster.avgRealizedPnl === null ? '--' : signedPct(cluster.avgRealizedPnl)}</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">No repeat failure mode yet. Keep closing trades and this will cluster the weak spots automatically.</p>}
+              </div>
+            </div>
+          </div>
+
           <div className="stack-list">
             {paperPerformance.bySetupType.length ? paperPerformance.bySetupType.map((bucket) => (
               <div className="stack-row review-row" key={bucket.key}>
@@ -1262,6 +1327,13 @@ function reviewVerdictTextClass(verdict: PaperAfterActionReview['verdict']) {
   if (verdict === 'excellent' || verdict === 'solid') return 'positive';
   if (verdict === 'needs-work') return 'negative';
   return undefined;
+}
+
+function streakLabel(direction: 'win' | 'loss' | 'flat' | 'mixed', count: number) {
+  if (!count || direction === 'mixed') return 'Mixed';
+  if (direction === 'win') return `${count}W streak`;
+  if (direction === 'loss') return `${count}L streak`;
+  return `${count} flat`;
 }
 
 export default App;

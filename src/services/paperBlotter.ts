@@ -76,6 +76,28 @@ export type PaperPerformanceSummary = {
   totals: PaperPerformanceBucket;
   bySetupType: PaperPerformanceBucket[];
   byEdgeBucket: PaperPerformanceBucket[];
+  fastValidation: {
+    closedCount: number;
+    expectancyPerTrade: number | null;
+    expectancyLabel: string;
+    recentForm: {
+      sampleSize: number;
+      wins: number;
+      losses: number;
+      flats: number;
+      totalRealizedPnl: number;
+      avgRealizedPnl: number | null;
+      streak: { direction: 'win' | 'loss' | 'flat' | 'mixed'; count: number };
+    };
+    failureClusters: {
+      key: string;
+      label: string;
+      count: number;
+      avgRealizedPnl: number | null;
+      totalRealizedPnl: number;
+      detail: string;
+    }[];
+  };
   diagnostics: {
     bestSetup: PaperPerformanceBucket | null;
     weakestSetup: PaperPerformanceBucket | null;
@@ -363,6 +385,87 @@ function buildLessons(totals: PaperPerformanceBucket, bySetupType: PaperPerforma
   return lessons.slice(0, 4);
 }
 
+function round4(value: number) {
+  return Number(value.toFixed(4));
+}
+
+function buildRecentForm(entries: PaperBlotterEntry[]) {
+  const recent = entries
+    .filter((entry) => entry.state === 'closed')
+    .sort((left, right) => new Date(right.closedAt ?? 0).getTime() - new Date(left.closedAt ?? 0).getTime())
+    .slice(0, 5);
+
+  const wins = recent.filter((entry) => entry.outcome === 'win').length;
+  const losses = recent.filter((entry) => entry.outcome === 'loss').length;
+  const flats = recent.filter((entry) => entry.outcome === 'flat').length;
+  const totalRealizedPnl = round4(recent.reduce((sum, entry) => sum + (entry.realizedPnlPoints ?? 0), 0));
+  const avgRealizedPnl = recent.length ? round4(totalRealizedPnl / recent.length) : null;
+
+  let streakDirection: 'win' | 'loss' | 'flat' | 'mixed' = 'mixed';
+  let streakCount = 0;
+  if (recent.length) {
+    const first = recent[0].outcome;
+    if (first === 'win' || first === 'loss' || first === 'flat') {
+      streakDirection = first;
+      streakCount = recent.findIndex((entry) => entry.outcome !== first);
+      if (streakCount === -1) streakCount = recent.length;
+    }
+  }
+
+  return {
+    sampleSize: recent.length,
+    wins,
+    losses,
+    flats,
+    totalRealizedPnl,
+    avgRealizedPnl,
+    streak: { direction: streakDirection, count: streakCount },
+  };
+}
+
+function buildFailureClusters(entries: PaperBlotterEntry[]) {
+  const closedLosers = entries.filter((entry) => entry.state === 'closed' && entry.outcome === 'loss');
+  const clusters = [
+    {
+      key: 'thin-edge',
+      label: 'Thin edge losses',
+      items: closedLosers.filter((entry) => Math.abs(entry.entryEdge) < 0.06),
+      detail: 'Losses that started with less than 6 pts of entry edge.',
+    },
+    {
+      key: 'confidence-fade',
+      label: 'Confidence fade',
+      items: closedLosers.filter((entry) => entry.currentConfidence <= entry.entryConfidence - 0.05),
+      detail: 'Losses where forecast confidence materially deteriorated after entry.',
+    },
+    {
+      key: 'edge-collapse',
+      label: 'Edge collapse',
+      items: closedLosers.filter((entry) => entry.currentEdge <= entry.entryEdge - 0.03),
+      detail: 'Losses where the market quickly closed the original gap.',
+    },
+    {
+      key: 'stop-loss',
+      label: 'Stop-triggered exits',
+      items: closedLosers.filter((entry) => entry.exitSuggestion.reason === 'stop-loss'),
+      detail: 'Losses that ended with the rules engine already signaling a stop/exit.',
+    },
+  ];
+
+  return clusters
+    .filter((cluster) => cluster.items.length)
+    .map((cluster) => ({
+      key: cluster.key,
+      label: cluster.label,
+      count: cluster.items.length,
+      avgRealizedPnl: cluster.items.length ? round4(cluster.items.reduce((sum, entry) => sum + (entry.realizedPnlPoints ?? 0), 0) / cluster.items.length) : null,
+      totalRealizedPnl: round4(cluster.items.reduce((sum, entry) => sum + (entry.realizedPnlPoints ?? 0), 0)),
+      detail: cluster.detail,
+    }))
+    .sort((left, right) => right.count - left.count || left.totalRealizedPnl - right.totalRealizedPnl)
+    .slice(0, 4);
+}
+
 export function getPaperBlotter() {
   return readStore();
 }
@@ -559,6 +662,7 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
 
 export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEntry>): PaperPerformanceSummary {
   const entries = Object.values(blotter);
+  const closedEntries = entries.filter((entry) => entry.state === 'closed');
   const groups = new Map<string, PaperBlotterEntry[]>();
   const edgeGroups = new Map<string, { label: string; entries: PaperBlotterEntry[] }>();
 
@@ -588,11 +692,27 @@ export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEn
     .filter((value): value is string => Boolean(value))
     .sort();
   const lastClosedAt = closedTimes.length ? closedTimes[closedTimes.length - 1] : null;
+  const expectancyPerTrade = closedEntries.length ? round4(closedEntries.reduce((sum, entry) => sum + (entry.realizedPnlPoints ?? 0), 0) / closedEntries.length) : null;
+  const recentForm = buildRecentForm(entries);
+  const failureClusters = buildFailureClusters(entries);
 
   return {
     totals,
     bySetupType,
     byEdgeBucket,
+    fastValidation: {
+      closedCount: closedEntries.length,
+      expectancyPerTrade,
+      expectancyLabel: expectancyPerTrade === null
+        ? 'Need closed trades'
+        : expectancyPerTrade > 0.01
+          ? 'Positive expectancy'
+          : expectancyPerTrade < -0.01
+            ? 'Negative expectancy'
+            : 'Near flat expectancy',
+      recentForm,
+      failureClusters,
+    },
     diagnostics: {
       bestSetup: pickBestBucket(bySetupType),
       weakestSetup: pickWorstBucket(bySetupType),
