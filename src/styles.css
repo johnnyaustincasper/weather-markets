@@ -32,17 +32,6 @@ body {
     linear-gradient(180deg, rgba(12, 46, 31, 0.22), transparent 30%),
     linear-gradient(180deg, #04110d 0%, #05150f 100%);
 }
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(rgba(115, 255, 196, 0.045) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(115, 255, 196, 0.045) 1px, transparent 1px);
-  background-size: 48px 48px;
-  mask-image: radial-gradient(circle at center, black 40%, transparent 100%);
-}
 button, select, input { font: inherit; }
 a { color: inherit; }
 small { color: var(--muted); }
