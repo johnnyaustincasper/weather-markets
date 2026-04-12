@@ -115,7 +115,8 @@ li + li { margin-top: 0.35rem; }
 .telemetry-panel,
 .review-panel,
 .summary-card,
-.system-banner { padding: 14px; }
+.system-banner,
+.account-command-panel { padding: 14px; }
 
 .mission-hero {
   display: grid;
@@ -451,6 +452,7 @@ h2 { font-size: 1.02rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .source-metrics { text-align: right; display: grid; gap: 6px; font-weight: 600; font-family: var(--mono); font-size: 0.73rem; }
 
 .after-action-grid { align-items: start; }
+.paper-account-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .portfolio-panel .review-metrics { margin-bottom: 14px; }
 .execution-glance-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .execution-visibility-grid { align-items: start; }
@@ -591,6 +593,7 @@ h2 { font-size: 1.02rem; text-transform: uppercase; letter-spacing: 0.03em; }
   .command-summary-grid,
   .execution-summary-grid,
   .execution-glance-grid,
+  .paper-account-grid,
   .signal-strip,
   .tuning-grid,
   .footer-strip,
@@ -606,7 +609,8 @@ h2 { font-size: 1.02rem; text-transform: uppercase; letter-spacing: 0.03em; }
   .telemetry-panel,
   .review-panel,
   .summary-card,
-  .system-banner { padding: 16px; }
+  .system-banner,
+  .account-command-panel { padding: 16px; }
   .panel,
   .metric-card,
   .operator-card,

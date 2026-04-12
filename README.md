@@ -1,12 +1,12 @@
 # Weather Markets MVP
 
-A polished React + Vite scanner for weather-driven prediction market setups.
+A polished React + Vite scanner for weather-driven prediction market setups, now with a clear paper account and equity layer for simulated capital tracking.
 
 ## What changed in this phase
 - live Polymarket ingestion for market-context scanning
 - live Open-Meteo and NWS weather ingestion with typed normalization
 - computed implied probability, model probability, edge, disagreement, confidence, and freshness in the UI
-- premium dashboard updated with feed status, freshness, heuristic details, and source comparison
+- premium dashboard updated with feed status, freshness, heuristic details, source comparison, and a dedicated paper account command panel
 - clean seam for replacing heuristics with a real event-resolution model later
 
 ## Important note
@@ -50,6 +50,7 @@ This repo is now scaffolded for a standalone Firebase path on project `weather-m
 - `src/App.tsx` now offers Firebase Auth sign-in, hydrates only the signed-in owner's ledger from Firestore, and otherwise falls back cleanly to browser-local storage
 - `functions/src/index.ts` adds a backend-runner-ready scheduled paper bot tick path plus an HTTP trigger for manual runs
 - the UI shows whether paper persistence is running local-only or against Firestore
+- the UI now surfaces paper account value, cash, exposure, open PnL, realized PnL, and bot-managed capital from the same blotter, order, and bot state already tracked in-app
 - the operator panel now includes bot supervision checks for overdue ticks, stale inputs, queue buildup, and fill handoff gaps
 - backend and manual bot ticks now append a durable run audit trail with action counts, stale-input counts, and queued versus active posture so production supervision can verify scheduler behavior without live trading
 
@@ -98,18 +99,34 @@ npm install
 npm --prefix functions install
 npm run build
 npm run build:functions
-npm --prefix functions run tick:once
+npm --prefix functions run tick:once -- <ledgerId> <ownerId>
 npm run deploy:backend
 ```
 
 Optional backend env vars:
 - `WEATHER_MARKETS_PAPER_LEDGER_ID`, default `default`
-- `WEATHER_MARKETS_RUNNER_ID`, default `firebase-scheduler`, also used as the owner-scoped ledger id prefix for backend-managed paper ledgers
+- `WEATHER_MARKETS_RUNNER_ID`, set this to the Firebase Auth uid that owns the paper ledger you want the always-on bot to manage. If left at the default `firebase-scheduler` placeholder, scheduled runs now block on purpose so the bot does not silently write to an unreadable owner scope.
 - `WEATHER_MARKETS_CRON`, default `every 5 minutes`
+- `WEATHER_MARKETS_TRIGGER_SECRET`, optional shared secret for the manual HTTP trigger. Send it as `x-weather-markets-trigger-secret`, `?secret=...`, or JSON body `secret`.
+
+Owner identity mapping for the backend runner:
+- the signed-in app writes one Firestore ledger per owner uid
+- the Firestore document id is `{ownerUid}__{ledgerId}`
+- the Firestore path is `paperTradeLedgers/{ownerUid}__{ledgerId}`
+- the scheduler must use that same `ownerUid` as `WEATHER_MARKETS_RUNNER_ID`
+- local one-shot runs now fail fast if you omit `<ownerUid>` so the target scope stays explicit
+
+Example:
+```bash
+# if the signed-in owner uid is abc123 and the ledger id is default,
+# the backend runner must use WEATHER_MARKETS_RUNNER_ID=abc123
+# and it will read/write paperTradeLedgers/abc123__default
+npm --prefix functions run tick:once -- default abc123
+```
 
 Deployed Firebase functions:
-- `runScheduledPaperBot`, the cron entrypoint
-- `triggerPaperBotNow`, a manual HTTP trigger for ad hoc backend runs
+- `runScheduledPaperBot`, the cron entrypoint. It now records run warnings, owner-scope metadata, and blocks if the runner owner is still the default placeholder.
+- `triggerPaperBotNow`, a manual HTTP trigger for ad hoc backend runs. It accepts either query params or JSON body for `ledgerId` and `ownerId`, returns the resolved owner-scope mapping in its summary, and can be protected with `WEATHER_MARKETS_TRIGGER_SECRET`.
 
 ### Manual console steps still required
 1. Open Firebase Console for project `weather-markets-bot`

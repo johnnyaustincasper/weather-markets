@@ -1100,7 +1100,7 @@ function App() {
       <div className="grid-haze grid-haze-right" />
       <div className="crt-noise" />
       <main className="command-deck">
-        <section className="panel mission-hero">
+        <section className="panel mission-hero" data-panel="sys.hero">
           <div className="hero-callout">
             <div className="eyebrow-row">
               <p className="eyebrow">WX-2060 strategic command deck // operator terminal</p>
@@ -1123,9 +1123,9 @@ function App() {
           </div>
         </section>
 
-        {error && <section className="panel system-banner tone-bad"><strong>System advisory</strong><span>{error}</span></section>}
+        {error && <section className="panel system-banner tone-bad" data-panel="sys.alert"><strong>System advisory</strong><span>{error}</span></section>}
 
-        <section className="panel account-command-panel">
+        <section className="panel account-command-panel" data-panel="acct.summary">
           <div className="panel-header">
             <div>
               <p className="eyebrow">Paper account command</p>
