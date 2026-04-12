@@ -1,4 +1,4 @@
-import type { WeatherMarket } from '../types';
+import type { QuoteStatus, WeatherMarket } from '../types';
 
 export type MarketHistorySnapshot = {
   capturedAt: string;
@@ -7,6 +7,9 @@ export type MarketHistorySnapshot = {
   confidence: number;
   spread: number | null;
   midpoint: number | null;
+  freshnessMinutes: number;
+  quoteStatus: QuoteStatus;
+  quoteQualityScore: number;
 };
 
 export type MarketHistoryRecord = {
@@ -29,9 +32,14 @@ export type MarketTrendSummary = {
   edge: MetricTrend;
   confidence: MetricTrend;
   spread: MetricTrend;
+  freshness: MetricTrend;
+  quoteQuality: MetricTrend;
   latestCapturedAt: string | null;
   previousCapturedAt: string | null;
   snapshotCount: number;
+  latestQuoteStatus: QuoteStatus | null;
+  previousQuoteStatus: QuoteStatus | null;
+  statusFlipCount: number;
 };
 
 export type WatcherOverview = {
@@ -39,6 +47,8 @@ export type WatcherOverview = {
   snapshotsStored: number;
   risingEdgeCount: number;
   tighteningSpreadCount: number;
+  executionImprovingCount: number;
+  freshnessWorseningCount: number;
   lastCapturedAt: string | null;
 };
 
@@ -76,6 +86,14 @@ function trimSnapshots(snapshots: MarketHistorySnapshot[]) {
     .slice(-MAX_SNAPSHOTS_PER_MARKET);
 }
 
+function quoteStatusScore(status: QuoteStatus) {
+  if (status === 'tight') return 1;
+  if (status === 'tradable') return 0.72;
+  if (status === 'wide') return 0.42;
+  if (status === 'stale') return 0.2;
+  return 0;
+}
+
 function toSnapshot(market: WeatherMarket, capturedAt: string): MarketHistorySnapshot {
   return {
     capturedAt,
@@ -84,6 +102,9 @@ function toSnapshot(market: WeatherMarket, capturedAt: string): MarketHistorySna
     confidence: market.confidence,
     spread: market.clobQuote?.spread ?? null,
     midpoint: market.clobQuote?.midpoint ?? null,
+    freshnessMinutes: market.freshnessMinutes,
+    quoteStatus: market.quoteStatus,
+    quoteQualityScore: quoteStatusScore(market.quoteStatus),
   };
 }
 
@@ -94,6 +115,9 @@ function shouldAppendSnapshot(previous: MarketHistorySnapshot | undefined, next:
     || previous.confidence !== next.confidence
     || previous.spread !== next.spread
     || previous.midpoint !== next.midpoint
+    || previous.freshnessMinutes !== next.freshnessMinutes
+    || previous.quoteStatus !== next.quoteStatus
+    || previous.quoteQualityScore !== next.quoteQualityScore
     || previous.capturedAt !== next.capturedAt;
 }
 
@@ -152,14 +176,24 @@ export function summarizeMarketTrend(marketId: string): MarketTrendSummary {
   const latest = snapshots[snapshots.length - 1] ?? null;
   const previous = snapshots[snapshots.length - 2] ?? null;
 
+  let statusFlipCount = 0;
+  for (let index = 1; index < snapshots.length; index += 1) {
+    if (snapshots[index - 1]?.quoteStatus !== snapshots[index]?.quoteStatus) statusFlipCount += 1;
+  }
+
   return {
     impliedProbability: buildTrend(latest?.impliedProbability ?? null, previous?.impliedProbability ?? null),
     edge: buildTrend(latest?.edge ?? null, previous?.edge ?? null),
     confidence: buildTrend(latest?.confidence ?? null, previous?.confidence ?? null),
     spread: buildTrend(latest?.spread ?? null, previous?.spread ?? null),
+    freshness: buildTrend(latest?.freshnessMinutes ?? null, previous?.freshnessMinutes ?? null),
+    quoteQuality: buildTrend(latest?.quoteQualityScore ?? null, previous?.quoteQualityScore ?? null),
     latestCapturedAt: latest?.capturedAt ?? null,
     previousCapturedAt: previous?.capturedAt ?? null,
     snapshotCount: snapshots.length,
+    latestQuoteStatus: latest?.quoteStatus ?? null,
+    previousQuoteStatus: previous?.quoteStatus ?? null,
+    statusFlipCount,
   };
 }
 
@@ -174,11 +208,15 @@ export function getWatcherOverview(): WatcherOverview {
 
   let risingEdgeCount = 0;
   let tighteningSpreadCount = 0;
+  let executionImprovingCount = 0;
+  let freshnessWorseningCount = 0;
 
   for (const record of records) {
     const trend = summarizeMarketTrend(record.marketId);
     if ((trend.edge.delta ?? 0) > 0) risingEdgeCount += 1;
     if ((trend.spread.delta ?? 0) < 0) tighteningSpreadCount += 1;
+    if ((trend.quoteQuality.delta ?? 0) > 0) executionImprovingCount += 1;
+    if ((trend.freshness.delta ?? 0) > 0) freshnessWorseningCount += 1;
   }
 
   return {
@@ -186,6 +224,8 @@ export function getWatcherOverview(): WatcherOverview {
     snapshotsStored,
     risingEdgeCount,
     tighteningSpreadCount,
+    executionImprovingCount,
+    freshnessWorseningCount,
     lastCapturedAt,
   };
 }

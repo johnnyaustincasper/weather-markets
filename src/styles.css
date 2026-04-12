@@ -441,6 +441,13 @@ tbody tr:hover,
   color: var(--muted);
 }
 
+.history-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .history-row span {
   color: var(--text);
   font-weight: 700;
@@ -481,10 +488,15 @@ tbody tr:hover,
 }
 
 .score-grid,
-.trend-grid {
+.trend-grid,
+.execution-summary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+.execution-summary-grid {
+  margin-top: 14px;
 }
 
 .sparkline-grid {
@@ -559,6 +571,10 @@ tbody tr:hover,
   display: block;
   font-size: 1.4rem;
   margin: 10px 0;
+}
+
+.execution-summary-card strong {
+  margin-bottom: 6px;
 }
 
 .confidence-list {
@@ -664,6 +680,7 @@ tbody tr:hover,
   .detail-metrics,
   .score-grid,
   .trend-grid,
+  .execution-summary-grid,
   .sparkline-grid,
   .operator-grid,
   .checklist-grid {

@@ -12,6 +12,8 @@ const pct = (value: number) => `${Math.round(value * 100)}%`;
 const signedPct = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`;
 const quotePct = (value: number | null | undefined) => (value === null || value === undefined ? '--' : pct(value));
 const signedQuotePct = (value: number | null | undefined) => (value === null || value === undefined ? '--' : `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`);
+const quoteQualityLabel = (value: number) => `${Math.round(value * 100)} score`;
+const signedQuoteQuality = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`;
 const freshnessLabel = (minutes: number) => {
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.round(minutes / 60);
@@ -392,7 +394,7 @@ function App() {
           <div className="panel summary-card">
             <span className="summary-label">Watcher memory</span>
             <strong>{watcherOverview.snapshotsStored} local snapshots stored</strong>
-            <span className="subtle">{watcherOverview.risingEdgeCount} names improving edge, {watcherOverview.tighteningSpreadCount} seeing tighter spread.</span>
+            <span className="subtle">{watcherOverview.risingEdgeCount} names improving edge, {watcherOverview.executionImprovingCount} seeing better execution.</span>
           </div>
         </section>
 
@@ -582,6 +584,21 @@ function App() {
                         <TrendMetric label="Edge" trend={selectedTrend.edge} formatter={signedPct} deltaFormatter={signedPct} />
                         <TrendMetric label="Confidence" trend={selectedTrend.confidence} formatter={pct} deltaFormatter={signedPct} />
                         <TrendMetric label="Spread" trend={selectedTrend.spread} formatter={quotePct} deltaFormatter={signedQuotePct} />
+                        <TrendMetric label="Freshness" trend={selectedTrend.freshness} formatter={freshnessLabel} deltaFormatter={(value) => `${value >= 0 ? '+' : ''}${value}m`} reverseTone />
+                        <TrendMetric label="Execution" trend={selectedTrend.quoteQuality} formatter={quoteQualityLabel} deltaFormatter={signedQuoteQuality} />
+                      </div>
+                      <div className="execution-summary-grid">
+                        <ExecutionSummaryCard
+                          label="Quote posture"
+                          value={selectedTrend.latestQuoteStatus ? selectedTrend.latestQuoteStatus.toUpperCase() : '--'}
+                          detail={selectedTrend.previousQuoteStatus ? `Prev ${selectedTrend.previousQuoteStatus.toUpperCase()}` : 'Need another snapshot'}
+                          toneClass={selectedTrend.latestQuoteStatus ? quoteToneClass(selectedTrend.latestQuoteStatus) : 'tone-muted'}
+                        />
+                        <ExecutionSummaryCard
+                          label="Status flips"
+                          value={String(selectedTrend.statusFlipCount)}
+                          detail={selectedTrend.statusFlipCount ? 'Execution regime has changed locally' : 'Execution posture has been stable'}
+                        />
                       </div>
                     </div>
                   )}
@@ -589,10 +606,12 @@ function App() {
                     <div>
                       <span className="detail-label">Short-window trend tape</span>
                       <div className="sparkline-grid">
-                        <SparklineMetric label="Implied" values={selectedHistoryWindow.map((snapshot) => snapshot.impliedProbability)} formatter={pct} tone="neutral" />
-                        <SparklineMetric label="Edge" values={selectedHistoryWindow.map((snapshot) => snapshot.edge)} formatter={signedPct} tone={(selectedHistoryWindow[selectedHistoryWindow.length - 1]?.edge ?? 0) >= 0 ? 'positive' : 'negative'} />
-                        <SparklineMetric label="Confidence" values={selectedHistoryWindow.map((snapshot) => snapshot.confidence)} formatter={pct} tone="positive" />
-                        <SparklineMetric label="CLOB spread" values={selectedHistoryWindow.map((snapshot) => snapshot.spread)} formatter={quotePct} tone="neutral" />
+                        <SparklineMetric label="Implied" values={selectedHistoryWindow.map((snapshot) => snapshot.impliedProbability)} formatter={pct} tone="neutral" deltaFormatter={signedPct} />
+                        <SparklineMetric label="Edge" values={selectedHistoryWindow.map((snapshot) => snapshot.edge)} formatter={signedPct} tone={(selectedHistoryWindow[selectedHistoryWindow.length - 1]?.edge ?? 0) >= 0 ? 'positive' : 'negative'} deltaFormatter={signedPct} />
+                        <SparklineMetric label="Confidence" values={selectedHistoryWindow.map((snapshot) => snapshot.confidence)} formatter={pct} tone="positive" deltaFormatter={signedPct} />
+                        <SparklineMetric label="CLOB spread" values={selectedHistoryWindow.map((snapshot) => snapshot.spread)} formatter={quotePct} tone="neutral" deltaFormatter={signedQuotePct} />
+                        <SparklineMetric label="Freshness" values={selectedHistoryWindow.map((snapshot) => snapshot.freshnessMinutes)} formatter={freshnessLabel} tone="negative" reverseTone deltaFormatter={(value) => `${value >= 0 ? '+' : ''}${Math.round(value)}m vs window start`} />
+                        <SparklineMetric label="Execution" values={selectedHistoryWindow.map((snapshot) => snapshot.quoteQualityScore)} formatter={quoteQualityLabel} tone="positive" deltaFormatter={signedQuoteQuality} />
                       </div>
                     </div>
                   )}
@@ -774,13 +793,19 @@ function TrendMetric({
   trend,
   formatter,
   deltaFormatter,
+  reverseTone,
 }: {
   label: string;
   trend: MetricTrend;
   formatter: (value: number) => string;
   deltaFormatter: (value: number) => string;
+  reverseTone?: boolean;
 }) {
-  const tone = trend.direction === 'up' ? 'positive' : trend.direction === 'down' ? 'negative' : '';
+  const tone = trend.direction === 'up'
+    ? reverseTone ? 'negative' : 'positive'
+    : trend.direction === 'down'
+      ? reverseTone ? 'positive' : 'negative'
+      : '';
 
   return (
     <div className="score-card">
@@ -797,6 +822,11 @@ function HistoryRow({ snapshot }: { snapshot: MarketHistorySnapshot }) {
       <div>
         <strong>{new Date(snapshot.capturedAt).toLocaleString()}</strong>
         <p>Implied {pct(snapshot.impliedProbability)} · Edge {signedPct(snapshot.edge)} · Confidence {pct(snapshot.confidence)}</p>
+        <div className="history-meta-row">
+          <span className={`status-chip ${quoteToneClass(snapshot.quoteStatus)}`}>Quote {snapshot.quoteStatus.toUpperCase()}</span>
+          <span className="status-chip tone-muted">Freshness {freshnessLabel(snapshot.freshnessMinutes)}</span>
+          <span className="status-chip tone-muted">Execution {quoteQualityLabel(snapshot.quoteQualityScore)}</span>
+        </div>
       </div>
       <span>Spread {quotePct(snapshot.spread)} · Mid {quotePct(snapshot.midpoint)}</span>
     </div>
@@ -808,23 +838,33 @@ function SparklineMetric({
   values,
   formatter,
   tone,
+  reverseTone,
+  deltaFormatter,
 }: {
   label: string;
   values: Array<number | null>;
   formatter: (value: number) => string;
   tone: 'positive' | 'negative' | 'neutral';
+  reverseTone?: boolean;
+  deltaFormatter: (value: number) => string;
 }) {
   const filtered = values.filter((value): value is number => value !== null && Number.isFinite(value));
   const latest = filtered[filtered.length - 1] ?? null;
   const first = filtered[0] ?? null;
   const delta = latest !== null && first !== null ? latest - first : null;
 
+  const deltaTone = delta === null || tone === 'neutral'
+    ? ''
+    : reverseTone
+      ? delta > 0 ? 'negative' : delta < 0 ? 'positive' : ''
+      : tone;
+
   return (
     <div className="sparkline-card">
       <div className="sparkline-copy">
         <span>{label}</span>
         <strong>{latest === null ? '--' : formatter(latest)}</strong>
-        <small className={tone === 'neutral' ? '' : tone}>{delta === null ? 'Need more local history' : `${delta >= 0 ? '+' : ''}${Math.round(delta * 100)} pts vs window start`}</small>
+        <small className={deltaTone}>{delta === null ? 'Need more local history' : deltaFormatter(delta)}</small>
       </div>
       <Sparkline values={values} tone={tone} />
     </div>
@@ -850,6 +890,16 @@ function Sparkline({ values, tone }: { values: Array<number | null>; tone: 'posi
     <svg className={`sparkline sparkline-${tone}`} viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
       <path d={path} />
     </svg>
+  );
+}
+
+function ExecutionSummaryCard({ label, value, detail, toneClass }: { label: string; value: string; detail: string; toneClass?: string }) {
+  return (
+    <div className="score-card execution-summary-card">
+      <span>{label}</span>
+      <strong className={toneClass ?? ''}>{value}</strong>
+      <p>{detail}</p>
+    </div>
   );
 }
 
