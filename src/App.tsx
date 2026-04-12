@@ -25,6 +25,13 @@ import {
   summarizeMarketTrend,
   type MarketHistorySnapshot,
 } from './services/marketHistory';
+import {
+  DEFAULT_PAPER_LEDGER_ID,
+  isFirestorePersistenceEnabled,
+  loadPersistentPaperState,
+  persistPaperState,
+} from './services/paperPersistence';
+import { getFirebaseProjectId } from './lib/firebase';
 import type { MarketFeedMeta, QuoteStatus, WeatherMarket } from './types';
 
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
@@ -217,6 +224,12 @@ function App() {
   const [paperOrderDrafts, setPaperOrderDrafts] = useState<Record<string, { quantity: number; limitPrice: number; note: string }>>({});
   const [paperRepriceMeta, setPaperRepriceMeta] = useState<{ at: string; changedCount: number } | null>(null);
   const [selectedReviewMarketId, setSelectedReviewMarketId] = useState('');
+  const [persistenceStatus, setPersistenceStatus] = useState<{ mode: 'local' | 'firestore'; detail: string }>({
+    mode: isFirestorePersistenceEnabled() ? 'firestore' : 'local',
+    detail: isFirestorePersistenceEnabled()
+      ? `Firestore ledger ${DEFAULT_PAPER_LEDGER_ID} in project ${getFirebaseProjectId()}.`
+      : 'Browser-local paper ledger. Add Firebase env vars to enable durable backend persistence.',
+  });
 
   const fetchMarkets = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -292,6 +305,46 @@ function App() {
   }, [fetchMarkets]);
 
   useEffect(() => {
+    let active = true;
+
+    void (async () => {
+      if (!isFirestorePersistenceEnabled()) return;
+      try {
+        const result = await loadPersistentPaperState(DEFAULT_PAPER_LEDGER_ID);
+        if (!active || !result.state) {
+          if (active) {
+            setPersistenceStatus({
+              mode: 'firestore',
+              detail: `Firestore is configured for ${getFirebaseProjectId()}, no remote paper ledger found yet so local state will seed it.`,
+            });
+          }
+          return;
+        }
+
+        setWatchIds(result.state.watchIds);
+        setPaperState(result.state.paperState);
+        setPaperExecutionProfile(result.state.paperExecutionProfile);
+        setPaperBlotter(result.state.paperBlotter);
+        setPaperOrders(result.state.paperOrders);
+        setPersistenceStatus({
+          mode: 'firestore',
+          detail: `Hydrated paper ledger from Firestore (${getFirebaseProjectId()}/${DEFAULT_PAPER_LEDGER_ID}).`,
+        });
+      } catch (error) {
+        if (!active) return;
+        setPersistenceStatus({
+          mode: 'local',
+          detail: error instanceof Error ? `Firestore load failed, using local browser state: ${error.message}` : 'Firestore load failed, using local browser state.',
+        });
+      }
+    })();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(WATCH_STORAGE_KEY, JSON.stringify(watchIds));
   }, [watchIds]);
@@ -305,6 +358,45 @@ function App() {
     if (typeof window === 'undefined') return;
     window.localStorage.setItem(PAPER_EXECUTION_STORAGE_KEY, JSON.stringify(paperExecutionProfile));
   }, [paperExecutionProfile]);
+
+  useEffect(() => {
+    if (!isFirestorePersistenceEnabled()) return;
+
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const result = await persistPaperState({
+            version: 1,
+            watchIds,
+            paperState,
+            paperExecutionProfile,
+            paperBlotter,
+            paperOrders,
+            botState: {
+              mode: 'paper',
+              lastHydratedAt: new Date().toISOString(),
+              lastPersistedAt: null,
+            },
+            syncedAt: new Date().toISOString(),
+            source: 'local',
+          }, DEFAULT_PAPER_LEDGER_ID);
+
+          if (!result.persisted) return;
+          setPersistenceStatus({
+            mode: 'firestore',
+            detail: `Persisting paper ledger to Firestore (${getFirebaseProjectId()}/${DEFAULT_PAPER_LEDGER_ID}).`,
+          });
+        } catch (error) {
+          setPersistenceStatus({
+            mode: 'local',
+            detail: error instanceof Error ? `Firestore save failed, local browser state still active: ${error.message}` : 'Firestore save failed, local browser state still active.',
+          });
+        }
+      })();
+    }, 400);
+
+    return () => window.clearTimeout(timeout);
+  }, [watchIds, paperState, paperExecutionProfile, paperBlotter, paperOrders]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -669,6 +761,10 @@ function App() {
         </section>
 
         {error && <section className="panel system-banner tone-bad"><strong>System advisory</strong><span>{error}</span></section>}
+        <section className={`panel system-banner ${persistenceStatus.mode === 'firestore' ? 'tone-good' : 'tone-warn'}`}>
+          <strong>{persistenceStatus.mode === 'firestore' ? 'Backend persistence online' : 'Local-only persistence'}</strong>
+          <span>{persistenceStatus.detail}</span>
+        </section>
         {loading && <section className="panel system-banner"><strong>Mission board loading</strong><span>Pulling contracts, quotes, and weather-model inputs.</span></section>}
 
         <section className="panel ops-priority-panel">

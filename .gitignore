@@ -3,5 +3,7 @@ dist
 *.tsbuildinfo
 .vite
 .vercel
+.firebase
 vite.config.js
 vite.config.d.ts
+.env.local
