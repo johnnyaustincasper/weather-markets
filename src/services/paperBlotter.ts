@@ -1,5 +1,7 @@
 import type { PaperTradePlan, PaperPositionState } from './paperTrading';
 import type { WeatherMarket } from '../types';
+import type { PaperExecutionProfile, PaperExecutionSettings } from './paperExecutionSettings';
+import { mergePaperExecutionSettings } from './paperExecutionSettings';
 
 type PaperTradeRecord = {
   state: PaperPositionState;
@@ -35,6 +37,7 @@ export type PaperBlotterEntry = {
   currentConfidence: number;
   stopPrice: number | null;
   takeProfitPrice: number | null;
+  executionSettings: PaperExecutionSettings;
   exitSuggestion: {
     shouldClose: boolean;
     reason: PaperExitReason;
@@ -74,8 +77,22 @@ function appendJournal(existing: PaperBlotterJournalEntry[], next: PaperBlotterJ
   return [...existing, next].slice(-MAX_JOURNAL);
 }
 
-function entryPriceFor(market: WeatherMarket) {
+function rawReferencePriceFor(market: WeatherMarket, fillReference: PaperExecutionSettings['fillReference']) {
+  if (fillReference === 'ask') return market.clobQuote?.bestAsk ?? market.clobQuote?.midpoint ?? market.clobQuote?.lastTradePrice ?? market.impliedProbability ?? null;
+  if (fillReference === 'bid') return market.clobQuote?.bestBid ?? market.clobQuote?.midpoint ?? market.clobQuote?.lastTradePrice ?? market.impliedProbability ?? null;
+  if (fillReference === 'last') return market.clobQuote?.lastTradePrice ?? market.clobQuote?.midpoint ?? market.impliedProbability ?? null;
   return market.clobQuote?.midpoint ?? market.clobQuote?.lastTradePrice ?? market.impliedProbability ?? null;
+}
+
+function applySlippage(price: number | null, direction: PaperTradePlan['direction'], slippageBps: number) {
+  if (price === null || direction === 'stand-aside') return price;
+  const slippage = slippageBps / 10_000;
+  const adjusted = direction === 'buy-yes' ? price + slippage : price - slippage;
+  return Math.min(1, Math.max(0, adjusted));
+}
+
+function entryPriceFor(market: WeatherMarket, direction: PaperTradePlan['direction'], settings: PaperExecutionSettings) {
+  return applySlippage(rawReferencePriceFor(market, settings.fillReference), direction, settings.slippageBps);
 }
 
 function currentMarkFor(market: WeatherMarket) {
@@ -87,19 +104,18 @@ function signedPnL(direction: PaperTradePlan['direction'], entryPrice: number | 
   return direction === 'buy-yes' ? currentMark - entryPrice : entryPrice - currentMark;
 }
 
-function stopPriceFor(direction: PaperTradePlan['direction'], entryPrice: number | null) {
+function stopPriceFor(direction: PaperTradePlan['direction'], entryPrice: number | null, settings: PaperExecutionSettings) {
   if (entryPrice === null || direction === 'stand-aside') return null;
   return direction === 'buy-yes'
-    ? Math.max(0, entryPrice - 0.03)
-    : Math.min(1, entryPrice + 0.03);
+    ? Math.max(0, entryPrice - settings.stopLossPts)
+    : Math.min(1, entryPrice + settings.stopLossPts);
 }
 
-function takeProfitPriceFor(direction: PaperTradePlan['direction'], entryPrice: number | null, market: WeatherMarket) {
+function takeProfitPriceFor(direction: PaperTradePlan['direction'], entryPrice: number | null, settings: PaperExecutionSettings) {
   if (entryPrice === null || direction === 'stand-aside') return null;
-  const halfGap = Math.max(Math.abs(market.edge) / 2, 0.03);
   return direction === 'buy-yes'
-    ? Math.min(1, entryPrice + halfGap)
-    : Math.max(0, entryPrice - halfGap);
+    ? Math.min(1, entryPrice + settings.takeProfitPts)
+    : Math.max(0, entryPrice - settings.takeProfitPts);
 }
 
 function exitSuggestionFor(direction: PaperTradePlan['direction'], currentMark: number | null, stopPrice: number | null, takeProfitPrice: number | null, market: WeatherMarket) {
@@ -146,7 +162,7 @@ export function getPaperBlotter() {
   return readStore();
 }
 
-export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<string, PaperTradeRecord>, paperPlans: Record<string, PaperTradePlan>) {
+export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<string, PaperTradeRecord>, paperPlans: Record<string, PaperTradePlan>, executionProfile: PaperExecutionProfile) {
   const store = readStore();
   const nextStore: Record<string, PaperBlotterEntry> = { ...store };
 
@@ -160,11 +176,12 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
     const existing = nextStore[market.id];
     const state = paperRecord.state;
     const nowIso = new Date().toISOString();
-    const entryPrice = existing?.entryPrice ?? entryPriceFor(market);
+    const executionSettings = mergePaperExecutionSettings(executionProfile, market.id);
+    const entryPrice = existing?.entryPrice ?? entryPriceFor(market, plan.direction, executionSettings);
     const currentMark = currentMarkFor(market);
     const pnlPoints = signedPnL(plan.direction, entryPrice, currentMark);
-    const stopPrice = existing?.stopPrice ?? stopPriceFor(plan.direction, entryPrice);
-    const takeProfitPrice = existing?.takeProfitPrice ?? takeProfitPriceFor(plan.direction, entryPrice, market);
+    const stopPrice = existing?.stopPrice ?? stopPriceFor(plan.direction, entryPrice, executionSettings);
+    const takeProfitPrice = existing?.takeProfitPrice ?? takeProfitPriceFor(plan.direction, entryPrice, executionSettings);
     const exitSuggestion = state === 'active'
       ? exitSuggestionFor(plan.direction, currentMark, stopPrice, takeProfitPrice, market)
       : {
@@ -180,7 +197,7 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
       journal = appendJournal(journal, {
         at: paperRecord.updatedAt,
         kind: 'state-change',
-        summary: `${state.toUpperCase()} at ${entryPrice === null ? 'no mark' : `${Math.round(entryPrice * 100)}%`} with thesis snapshot saved.`,
+        summary: `${state.toUpperCase()} at ${entryPrice === null ? 'no mark' : `${Math.round(entryPrice * 100)}%`} using ${executionSettings.fillReference.toUpperCase()} + ${executionSettings.slippageBps} bps with thesis snapshot saved.`,
       });
     } else if (existing.state !== state) {
       journal = appendJournal(journal, {
@@ -210,6 +227,7 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
       marketId: market.id,
       marketTitle: market.title,
       direction: plan.direction,
+      executionSettings,
       state,
       thesisSnapshot: existing?.thesisSnapshot ?? plan.thesis,
       entryPrice,

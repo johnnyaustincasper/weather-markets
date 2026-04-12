@@ -1,4 +1,5 @@
 import type { QuoteStatus, WeatherMarket } from '../types';
+import type { PaperExecutionSettings } from './paperExecutionSettings';
 
 export type TradeDecision = 'would-trade' | 'watch' | 'no-trade';
 export type TradeDirection = 'buy-yes' | 'buy-no' | 'stand-aside';
@@ -24,6 +25,7 @@ export type PaperTradePlan = {
     maxUnits: number;
     scaleInUnits: number;
     riskBudgetPct: number;
+    unitSize: number;
     notionalLabel: string;
   };
   entryTrigger: string;
@@ -51,7 +53,7 @@ function convictionFor(score: number): PaperTradePlan['conviction'] {
   return 'low';
 }
 
-export function buildPaperTradePlan(market: WeatherMarket): PaperTradePlan {
+export function buildPaperTradePlan(market: WeatherMarket, settings: PaperExecutionSettings): PaperTradePlan {
   const absEdge = Math.abs(market.edge);
   const direction = directionFor(market.edge);
   const executionOk = quotePass(market.quoteStatus);
@@ -106,10 +108,11 @@ export function buildPaperTradePlan(market: WeatherMarket): PaperTradePlan {
 
   const blockers = entryCriteria.filter((item) => !item.passed).map((item) => `${item.label}: ${item.detail}`);
 
-  const suggestedUnits = conviction === 'high' ? 3 : conviction === 'medium' ? 2 : 1;
-  const maxUnits = conviction === 'high' ? 5 : conviction === 'medium' ? 3 : 2;
-  const scaleInUnits = conviction === 'high' ? 1 : 1;
-  const riskBudgetPct = conviction === 'high' ? 1.5 : conviction === 'medium' ? 1 : 0.5;
+  const convictionMultiplier = conviction === 'high' ? 1.5 : conviction === 'medium' ? 1 : 0.5;
+  const suggestedUnits = Math.max(1, Math.min(settings.maxUnits, Math.round(settings.unitSize * convictionMultiplier)));
+  const maxUnits = Math.max(suggestedUnits, settings.maxUnits);
+  const scaleInUnits = Math.min(settings.scaleInUnits, maxUnits);
+  const riskBudgetPct = Number((suggestedUnits * settings.stopLossPts * 100).toFixed(1));
 
   const wouldTrade = edgeOk && confidenceOk && executionOk && freshnessOk && disagreementOk && parseOk && direction !== 'stand-aside';
   const watchOnly = !wouldTrade && passCount >= 3;
@@ -129,15 +132,15 @@ export function buildPaperTradePlan(market: WeatherMarket): PaperTradePlan {
     blockers,
     entryCriteria,
     entryTrigger: wouldTrade
-      ? `Enter paper ${direction === 'buy-yes' ? 'YES' : 'NO'} while edge stays beyond 6 pts and quote remains ${executionOk ? market.quoteStatus : 'tradable'}.`
+      ? `Enter paper ${direction === 'buy-yes' ? 'YES' : 'NO'} using ${settings.fillReference.toUpperCase()} + ${settings.slippageBps} bps slippage while edge stays beyond 6 pts and quote remains ${executionOk ? market.quoteStatus : 'tradable'}.`
       : 'No entry yet. Wait until edge, confidence, execution, and freshness align together.',
     monitoringTrigger: 'Re-check after each quote refresh or weather-model update. If edge compresses by 3+ pts, reassess immediately.',
-    stopTrigger: `Abort or flatten if edge compresses under 3 pts, confidence drops below 55%, or quote degrades to WIDE/STALE for two checks.`,
-    takeProfitTrigger: 'Scale out when the market closes at least half the model gap, or when the contract becomes fully priced and asymmetry disappears.',
+    stopTrigger: `Abort or flatten if marked loss reaches ${signedPct(settings.stopLossPts)}, confidence drops below 55%, or quote degrades to WIDE/STALE for two checks.`,
+    takeProfitTrigger: `Scale out when marked gain reaches ${signedPct(settings.takeProfitPts)} or when the contract becomes fully priced and asymmetry disappears.`,
     exitCriteria: [
-      'Edge compresses below 3 pts or flips against the thesis.',
+      `Marked loss reaches ${signedPct(settings.stopLossPts)} or edge compresses below 3 pts or flips against the thesis.`,
       'Confidence falls below 55% or forecast disagreement widens above 28%.',
-      'Quote quality degrades to wide/stale for multiple refreshes.',
+      `Marked gain reaches ${signedPct(settings.takeProfitPts)} or quote quality degrades to wide/stale for multiple refreshes.`,
       'Event window is too close for fresh forecast updates to matter.',
     ],
     sizing: {
@@ -145,7 +148,8 @@ export function buildPaperTradePlan(market: WeatherMarket): PaperTradePlan {
       maxUnits,
       scaleInUnits,
       riskBudgetPct,
-      notionalLabel: `${riskBudgetPct}% paper risk budget, ${suggestedUnits}/${maxUnits} units initial size`,
+      unitSize: settings.unitSize,
+      notionalLabel: `${riskBudgetPct}% paper risk budget, ${suggestedUnits}/${maxUnits} units initial size, scale in ${scaleInUnits}, base unit ${settings.unitSize}`,
     },
   };
 }

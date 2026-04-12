@@ -321,6 +321,21 @@ h2 {
   width: 100%;
 }
 
+.tuning-grid select {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(7, 17, 31, 0.9);
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+.tuning-grid input:disabled,
+.tuning-grid select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .tuning-grid input[type="checkbox"] {
   width: 18px;
   height: 18px;

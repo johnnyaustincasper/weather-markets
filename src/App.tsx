@@ -3,6 +3,13 @@ import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marke
 import { getPaperBlotter, syncPaperBlotter, type PaperBlotterEntry } from './services/paperBlotter';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
 import {
+  DEFAULT_PAPER_EXECUTION_SETTINGS,
+  mergePaperExecutionSettings,
+  sanitizePaperExecutionSettings,
+  type PaperExecutionProfile,
+  type PaperExecutionSettings,
+} from './services/paperExecutionSettings';
+import {
   DEFAULT_WATCHER_REGIME_TUNING,
   captureMarketHistory,
   getMarketHistory,
@@ -19,6 +26,7 @@ import type { MarketFeedMeta, QuoteStatus, WeatherMarket } from './types';
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
 const REGIME_TUNING_STORAGE_KEY = 'weather-markets-regime-tuning';
 const PAPER_STATE_STORAGE_KEY = 'weather-markets-paper-state';
+const PAPER_EXECUTION_STORAGE_KEY = 'weather-markets-paper-execution';
 const REFRESH_MS = 90_000;
 const QUOTE_REFRESH_MS = 20_000;
 const MAX_ALERTS = 18;
@@ -109,6 +117,21 @@ const loadPaperState = (): Record<string, PaperTradeRecord> => {
     return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
     return {};
+  }
+};
+
+const loadPaperExecutionProfile = (): PaperExecutionProfile => {
+  if (typeof window === 'undefined') return { global: DEFAULT_PAPER_EXECUTION_SETTINGS, perMarket: {} };
+  try {
+    const raw = window.localStorage.getItem(PAPER_EXECUTION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Partial<PaperExecutionProfile> : {};
+    const perMarket = Object.fromEntries(Object.entries(parsed.perMarket ?? {}).map(([marketId, value]) => [marketId, sanitizePaperExecutionSettings(value)]));
+    return {
+      global: sanitizePaperExecutionSettings(parsed.global),
+      perMarket,
+    };
+  } catch {
+    return { global: DEFAULT_PAPER_EXECUTION_SETTINGS, perMarket: {} };
   }
 };
 
@@ -343,6 +366,7 @@ function App() {
   const [historyTick, setHistoryTick] = useState(0);
   const [regimeTuning, setRegimeTuning] = useState<WatcherRegimeTuning>(() => loadRegimeTuning());
   const [paperState, setPaperState] = useState<Record<string, PaperTradeRecord>>(() => loadPaperState());
+  const [paperExecutionProfile, setPaperExecutionProfile] = useState<PaperExecutionProfile>(() => loadPaperExecutionProfile());
   const [paperBlotter, setPaperBlotter] = useState<Record<string, PaperBlotterEntry>>(() => getPaperBlotter());
 
   const fetchMarkets = useCallback(async (silent = false) => {
@@ -433,6 +457,11 @@ function App() {
   }, [paperState]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(PAPER_EXECUTION_STORAGE_KEY, JSON.stringify(paperExecutionProfile));
+  }, [paperExecutionProfile]);
+
+  useEffect(() => {
     const interval = window.setInterval(() => {
       void fetchMarkets(true);
     }, REFRESH_MS);
@@ -496,7 +525,8 @@ function App() {
   const selectedTrend = useMemo(() => selectedMarket ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
   const selectedHistory = useMemo(() => selectedMarket ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const selectedHistoryWindow = useMemo(() => selectedHistory.slice(-12), [selectedHistory]);
-  const paperPlans = useMemo(() => Object.fromEntries(markets.map((market) => [market.id, buildPaperTradePlan(market)])), [markets]);
+  const effectivePaperSettings = useMemo(() => Object.fromEntries(markets.map((market) => [market.id, mergePaperExecutionSettings(paperExecutionProfile, market.id)])), [markets, paperExecutionProfile]);
+  const paperPlans = useMemo(() => Object.fromEntries(markets.map((market) => [market.id, buildPaperTradePlan(market, effectivePaperSettings[market.id])])), [markets, effectivePaperSettings]);
   const watchCount = watchIds.filter((id) => markets.some((market) => market.id === id)).length;
   const deterioratingCount = markets.filter((market) => (marketDeltas[market.id]?.freshnessDelta ?? 0) >= 20).length;
   const actionCount = allAlerts.filter((alert) => alert.tone !== 'bad').length;
@@ -506,8 +536,8 @@ function App() {
   const exitSuggestedCount = Object.values(paperBlotter).filter((item) => item.state === 'active' && item.exitSuggestion.shouldClose).length;
 
   useEffect(() => {
-    setPaperBlotter(syncPaperBlotter(markets, paperState, paperPlans));
-  }, [markets, paperPlans, paperState]);
+    setPaperBlotter(syncPaperBlotter(markets, paperState, paperPlans, paperExecutionProfile));
+  }, [markets, paperExecutionProfile, paperPlans, paperState]);
 
   const activeRegimePreset = useMemo(() => getActiveRegimePreset(regimeTuning), [regimeTuning]);
   const scanState = useMemo(() => formatScanState(meta, loading, refreshing, error), [meta, loading, refreshing, error]);
@@ -525,6 +555,31 @@ function App() {
 
   const resetRegimeTuning = () => {
     applyRegimePreset('balanced');
+  };
+
+  const updateGlobalPaperSetting = <K extends keyof PaperExecutionSettings>(key: K, value: PaperExecutionSettings[K]) => {
+    setPaperExecutionProfile((current) => ({
+      ...current,
+      global: sanitizePaperExecutionSettings({ ...current.global, [key]: value }),
+    }));
+  };
+
+  const updateMarketPaperSetting = <K extends keyof PaperExecutionSettings>(marketId: string, key: K, value: PaperExecutionSettings[K]) => {
+    setPaperExecutionProfile((current) => ({
+      ...current,
+      perMarket: {
+        ...current.perMarket,
+        [marketId]: sanitizePaperExecutionSettings({ ...(current.perMarket[marketId] ?? current.global), [key]: value }),
+      },
+    }));
+  };
+
+  const resetMarketPaperSettings = (marketId: string) => {
+    setPaperExecutionProfile((current) => {
+      const next = { ...current.perMarket };
+      delete next[marketId];
+      return { ...current, perMarket: next };
+    });
   };
 
   const toggleWatch = (marketId: string) => {
@@ -606,6 +661,11 @@ function App() {
             <span className="summary-label">Paper engine</span>
             <strong>{wouldTradeCount} markets would trade now</strong>
             <span className="subtle">{queuedPaperCount} queued, {activePaperCount} active, {exitSuggestedCount} exit suggestions live. Still read-only.</span>
+          </div>
+          <div className="panel summary-card">
+            <span className="summary-label">Paper execution</span>
+            <strong>{paperExecutionProfile.global.unitSize} unit base, {paperExecutionProfile.global.fillReference.toUpperCase()} fills</strong>
+            <span className="subtle">{paperExecutionProfile.global.slippageBps} bps slippage, stop {quotePct(paperExecutionProfile.global.stopLossPts)}, take profit {quotePct(paperExecutionProfile.global.takeProfitPts)}.</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Execution regimes</span>
@@ -850,6 +910,8 @@ function App() {
                     const paperPlan = paperPlans[selectedMarket.id];
                     const paperRecord = paperState[selectedMarket.id];
                     const blotterRecord = paperBlotter[selectedMarket.id];
+                    const marketPaperSettings = effectivePaperSettings[selectedMarket.id];
+                    const hasMarketPaperOverride = Boolean(paperExecutionProfile.perMarket[selectedMarket.id]);
                     return (
                       <>
                   <div className="detail-badges">
@@ -899,6 +961,27 @@ function App() {
                     />
                   </div>
                   <section className="paper-engine-panel">
+                    <div className="checklist-grid">
+                      <div className="checklist-card">
+                        <div className="tuning-header-row">
+                          <div>
+                            <span className="detail-label">Global paper execution</span>
+                            <p className="subtle">Applies across the local blotter unless a market override is set.</p>
+                          </div>
+                        </div>
+                        <PaperExecutionSettingsForm settings={paperExecutionProfile.global} onChange={updateGlobalPaperSetting} />
+                      </div>
+                      <div className="checklist-card">
+                        <div className="tuning-header-row">
+                          <div>
+                            <span className="detail-label">{hasMarketPaperOverride ? 'Per-market override' : 'Per-market override available'}</span>
+                            <p className="subtle">{hasMarketPaperOverride ? 'This market is using its own paper execution assumptions.' : 'Set this only if one contract needs custom sizing or exits.'}</p>
+                          </div>
+                          <button className="watch-toggle" onClick={() => hasMarketPaperOverride ? resetMarketPaperSettings(selectedMarket.id) : setPaperExecutionProfile((current) => ({ ...current, perMarket: { ...current.perMarket, [selectedMarket.id]: sanitizePaperExecutionSettings(current.global) } }))}>{hasMarketPaperOverride ? 'Use global' : 'Create override'}</button>
+                        </div>
+                        <PaperExecutionSettingsForm settings={marketPaperSettings} onChange={(key, value) => updateMarketPaperSetting(selectedMarket.id, key, value)} disabled={!hasMarketPaperOverride} />
+                      </div>
+                    </div>
                     <div className="paper-engine-header">
                       <div>
                         <span className="detail-label">Paper trade state</span>
@@ -928,7 +1011,7 @@ function App() {
                     <div className="execution-summary-grid">
                       <ExecutionSummaryCard label="Monitor" value="Live" detail={paperPlan.monitoringTrigger} />
                       <ExecutionSummaryCard label="Take profit" value="Scale out" detail={paperPlan.takeProfitTrigger} />
-                      <ExecutionSummaryCard label="Initial size" value={`${paperPlan.sizing.suggestedUnits} units`} detail={`Max ${paperPlan.sizing.maxUnits} units, scale in ${paperPlan.sizing.scaleInUnits} at a time.`} />
+                      <ExecutionSummaryCard label="Initial size" value={`${paperPlan.sizing.suggestedUnits} units`} detail={`Max ${paperPlan.sizing.maxUnits} units, scale in ${paperPlan.sizing.scaleInUnits}, base ${paperPlan.sizing.unitSize}.`} />
                       <ExecutionSummaryCard label="Blockers" value={String(paperPlan.blockers.length)} detail={paperPlan.blockers[0] ?? 'No active blocker, this setup clears the first paper-trade bar.'} toneClass={paperPlan.blockers.length ? 'negative' : 'positive'} />
                     </div>
                     {blotterRecord && (
@@ -944,7 +1027,7 @@ function App() {
                           <ExecutionSummaryCard label="Entry mark" value={quotePct(blotterRecord.entryPrice)} detail={`Queued ${formatClock(blotterRecord.queuedAt ?? undefined)} · active ${formatClock(blotterRecord.activatedAt ?? undefined)}`} />
                           <ExecutionSummaryCard label="Current mark" value={quotePct(blotterRecord.currentMark)} detail={`Last marked ${formatClock(blotterRecord.lastMarkedAt ?? undefined)}`} />
                           <ExecutionSummaryCard label="Paper PnL" value={signedQuotePct(blotterRecord.pnlPoints)} detail={blotterRecord.pnlPercentOnRisk === null ? 'Need a valid mark to score PnL.' : `${Math.round(blotterRecord.pnlPercentOnRisk)} bps on entry price`} toneClass={(blotterRecord.pnlPoints ?? 0) >= 0 ? 'positive' : 'negative'} />
-                          <ExecutionSummaryCard label="Risk rails" value={`${quotePct(blotterRecord.stopPrice)} stop`} detail={`Take profit ${quotePct(blotterRecord.takeProfitPrice)}`} toneClass={blotterRecord.exitSuggestion.shouldClose ? 'negative' : undefined} />
+                          <ExecutionSummaryCard label="Risk rails" value={`${quotePct(blotterRecord.stopPrice)} stop`} detail={`Take profit ${quotePct(blotterRecord.takeProfitPrice)} · ${blotterRecord.executionSettings.fillReference.toUpperCase()} + ${blotterRecord.executionSettings.slippageBps} bps`} toneClass={blotterRecord.exitSuggestion.shouldClose ? 'negative' : undefined} />
                         </div>
                         <div className="checklist-grid blotter-checklist-grid">
                           <div className="checklist-card">
@@ -1192,6 +1275,61 @@ function ActionCard({ title, body, emphasis }: { title: string; body: string; em
     <div className={`operator-card ${emphasis ? 'emphasis-card' : ''}`}>
       <span>{title}</span>
       <strong>{body}</strong>
+    </div>
+  );
+}
+
+function PaperExecutionSettingsForm({
+  settings,
+  onChange,
+  disabled,
+}: {
+  settings: PaperExecutionSettings;
+  onChange: <K extends keyof PaperExecutionSettings>(key: K, value: PaperExecutionSettings[K]) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="tuning-grid paper-settings-grid">
+      <label>
+        <span>Base unit size</span>
+        <input type="range" min="1" max="10" step="1" value={settings.unitSize} onChange={(event) => onChange('unitSize', Number(event.target.value))} disabled={disabled} />
+        <strong>{settings.unitSize} units</strong>
+      </label>
+      <label>
+        <span>Max units</span>
+        <input type="range" min="1" max="20" step="1" value={settings.maxUnits} onChange={(event) => onChange('maxUnits', Number(event.target.value))} disabled={disabled} />
+        <strong>{settings.maxUnits} units</strong>
+      </label>
+      <label>
+        <span>Scale-in clip</span>
+        <input type="range" min="1" max="10" step="1" value={settings.scaleInUnits} onChange={(event) => onChange('scaleInUnits', Number(event.target.value))} disabled={disabled} />
+        <strong>{settings.scaleInUnits} units</strong>
+      </label>
+      <label>
+        <span>Fill reference</span>
+        <select value={settings.fillReference} onChange={(event) => onChange('fillReference', event.target.value as PaperExecutionSettings['fillReference'])} disabled={disabled}>
+          <option value="ask">Ask</option>
+          <option value="mid">Mid</option>
+          <option value="bid">Bid</option>
+          <option value="last">Last trade</option>
+        </select>
+        <strong>{settings.fillReference.toUpperCase()}</strong>
+      </label>
+      <label>
+        <span>Slippage</span>
+        <input type="range" min="0" max="200" step="5" value={settings.slippageBps} onChange={(event) => onChange('slippageBps', Number(event.target.value))} disabled={disabled} />
+        <strong>{settings.slippageBps} bps</strong>
+      </label>
+      <label>
+        <span>Stop-loss</span>
+        <input type="range" min="0.01" max="0.2" step="0.005" value={settings.stopLossPts} onChange={(event) => onChange('stopLossPts', Number(event.target.value))} disabled={disabled} />
+        <strong>{quotePct(settings.stopLossPts)}</strong>
+      </label>
+      <label>
+        <span>Take-profit</span>
+        <input type="range" min="0.01" max="0.3" step="0.005" value={settings.takeProfitPts} onChange={(event) => onChange('takeProfitPts', Number(event.target.value))} disabled={disabled} />
+        <strong>{quotePct(settings.takeProfitPts)}</strong>
+      </label>
     </div>
   );
 }
