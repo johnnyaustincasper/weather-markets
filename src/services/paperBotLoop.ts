@@ -42,6 +42,7 @@ export type PaperBotLoopState = {
   nextDueAt: string | null;
   lastError: string | null;
   lastSummary: string | null;
+  recentActions: PaperBotLoopAction[];
   marketRuntime: Record<string, PaperBotMarketRuntime>;
 };
 
@@ -87,6 +88,7 @@ export const DEFAULT_PAPER_BOT_LOOP_STATE: PaperBotLoopState = {
   nextDueAt: null,
   lastError: null,
   lastSummary: null,
+  recentActions: [],
   marketRuntime: {},
 };
 
@@ -125,6 +127,7 @@ export function createPaperBotLoopState(overrides?: Partial<PaperBotLoopState>):
       ...DEFAULT_PAPER_BOT_LOOP_STATE.lease,
       ...(overrides?.lease ?? {}),
     },
+    recentActions: Array.isArray(overrides?.recentActions) ? overrides.recentActions.slice(0, 20) : [],
     marketRuntime: overrides?.marketRuntime ?? {},
   };
 }
@@ -265,6 +268,7 @@ export function runPaperBotTick({ state, markets, ownerId = 'local-runner', now 
         nextDueAt: addMs(now, existingLoop.cadenceMs),
         lastError: null,
         lastSummary: summary,
+        recentActions: [...actions, ...existingLoop.recentActions].slice(0, 20),
         marketRuntime: nextRuntime,
       },
       syncedAt: now,
