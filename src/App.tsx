@@ -11,6 +11,7 @@ import {
   type PaperAfterActionReview,
   type PaperBlotterEntry,
 } from './services/paperBlotter';
+import { summarizePaperAccount } from './services/paperAccount';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
 import { cancelPaperOrder, getPaperOrders, placePaperOrder, syncPaperOrders, type PaperOrder } from './services/paperOrders';
 import {
@@ -67,6 +68,7 @@ const formatDateTime = (iso?: string) => {
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 };
 const clampOrderPrice = (value: number) => Math.min(0.99, Math.max(0.01, value));
+const formatUsd = (value: number) => value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
 
 type MarketStatus = 'best' | 'watch' | 'candidate' | 'stale' | 'skip';
 type AlertTone = 'good' | 'warn' | 'bad';
@@ -126,6 +128,15 @@ type DeskAlert = {
   title: string;
   detail: string;
   tone: AlertTone | 'muted';
+};
+
+type BotActivityItem = {
+  id: string;
+  at: string;
+  title: string;
+  detail: string;
+  tone: AlertTone | 'muted';
+  kind: 'fill' | 'bot-run' | 'position';
 };
 
 const loadWatchIds = () => {
@@ -596,6 +607,7 @@ function App() {
   const selectedHistory = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
   const paperPerformance = useMemo(() => summarizePaperPerformance(paperBlotter), [paperBlotter]);
+  const paperAccount = useMemo(() => summarizePaperAccount({ blotter: paperBlotter, orders: paperOrders, botState: paperBotState }), [paperBlotter, paperBotState, paperOrders]);
   const paperBotRuntime = useMemo(() => Object.values(paperBotState.marketRuntime), [paperBotState.marketRuntime]);
   const paperBotSupervision = useMemo(() => summarizePaperBotSupervision({
     botState: paperBotState,
@@ -608,6 +620,67 @@ function App() {
     .sort((left, right) => right.consecutiveWouldTradeTicks - left.consecutiveWouldTradeTicks)
     .slice(0, 5), [paperBotRuntime]);
   const latestBotAudit = paperBotRunHistory[0] ?? null;
+  const allPaperOrders = useMemo(() => Object.values(paperOrders).flat(), [paperOrders]);
+  const allFilledOrders = useMemo(() => allPaperOrders.filter((order) => order.filledQuantity > 0), [allPaperOrders]);
+  const openBlotterEntries = useMemo(() => Object.values(paperBlotter)
+    .filter((entry) => entry.state === 'active' || entry.state === 'queued')
+    .sort((left, right) => Math.abs(right.markedPnlPoints ?? 0) - Math.abs(left.markedPnlPoints ?? 0)), [paperBlotter]);
+  const livePositionSummary = useMemo(() => {
+    const workingOrders = allPaperOrders.filter((order) => order.status === 'working' || order.status === 'partial');
+    const partialOrders = allPaperOrders.filter((order) => order.status === 'partial');
+    const filledOrders = allPaperOrders.filter((order) => order.status === 'filled');
+    const activePositions = Object.values(paperState).filter((item) => item.state === 'active');
+    const queuedPositions = Object.values(paperState).filter((item) => item.state === 'queued');
+    const closedPositions = Object.values(paperState).filter((item) => item.state === 'closed');
+    const totalFilledUnits = allFilledOrders.reduce((sum, order) => sum + order.filledQuantity, 0);
+    const realized = paperPerformance.totals.totalRealizedPnl;
+    const markedOpen = openBlotterEntries.reduce((sum, entry) => sum + (entry.markedPnlPoints ?? 0), 0);
+
+    return {
+      workingOrders: workingOrders.length,
+      partialOrders: partialOrders.length,
+      filledOrders: filledOrders.length,
+      activePositions: activePositions.length,
+      queuedPositions: queuedPositions.length,
+      closedPositions: closedPositions.length,
+      totalFilledUnits,
+      realized,
+      markedOpen: Number(markedOpen.toFixed(4)),
+    };
+  }, [allFilledOrders, allPaperOrders, openBlotterEntries, paperPerformance.totals.totalRealizedPnl, paperState]);
+  const botActivityFeed = useMemo(() => {
+    const fillItems: BotActivityItem[] = allFilledOrders.map((order) => ({
+      id: `fill-${order.id}`,
+      at: order.lastFillAt ?? order.updatedAt,
+      title: `${order.direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} fill`,
+      detail: `${order.marketTitle} filled ${order.filledQuantity}/${order.quantity}u at ${pct(order.fillPrice ?? order.limitPrice)} average.`,
+      tone: order.status === 'filled' ? 'good' : 'warn',
+      kind: 'fill',
+    }));
+    const botRunItems: BotActivityItem[] = paperBotRunHistory.map((run) => ({
+      id: `run-${run.runAt}-${run.runnerId}`,
+      at: run.runAt,
+      title: run.source === 'backend' ? 'Backend bot tick' : 'UI bot tick',
+      detail: `${run.summary} ${run.actionCount} actions, ${run.queuedCount} queued, ${run.activeCount} active.`,
+      tone: run.status === 'ok' ? 'good' : 'bad',
+      kind: 'bot-run',
+    }));
+    const positionItems: BotActivityItem[] = Object.entries(paperState)
+      .filter(([, record]) => record.state === 'active' || record.state === 'queued' || record.state === 'closed')
+      .map(([marketId, record]) => ({
+        id: `position-${marketId}-${record.updatedAt}`,
+        at: record.updatedAt,
+        title: `${record.state.toUpperCase()} position`,
+        detail: `${displayMarkets.find((market) => market.id === marketId)?.title ?? marketId}: ${record.note}`,
+        tone: record.state === 'active' ? 'good' : record.state === 'queued' ? 'warn' : 'muted',
+        kind: 'position',
+      }));
+
+    return [...fillItems, ...botRunItems, ...positionItems]
+      .sort((left, right) => new Date(right.at).getTime() - new Date(left.at).getTime())
+      .slice(0, 8);
+  }, [allFilledOrders, displayMarkets, paperBotRunHistory, paperState]);
+  const positionSpotlight = useMemo(() => openBlotterEntries.slice(0, 6), [openBlotterEntries]);
   const exposureSummary = useMemo(() => {
     const tracked = displayMarkets
       .map((market) => {
@@ -1025,19 +1098,20 @@ function App() {
     <div className="command-app-shell">
       <div className="grid-haze grid-haze-left" />
       <div className="grid-haze grid-haze-right" />
+      <div className="crt-noise" />
       <main className="command-deck">
         <section className="panel mission-hero">
           <div className="hero-callout">
             <div className="eyebrow-row">
-              <p className="eyebrow">WX-2060 strategic command deck</p>
+              <p className="eyebrow">WX-2060 strategic command deck // operator terminal</p>
               <span className={`status-pill ${error ? 'tone-bad' : showingFallbackFirst || meta?.usedCuratedFallback ? 'tone-warn' : 'tone-good'}`}>{error ? 'Feed degraded' : showingFallbackFirst || meta?.usedCuratedFallback ? 'Scenario-first mode' : 'Live tactical mode'}</span>
             </div>
-            <h1>Map weather-market campaigns like an operator, not a spreadsheet.</h1>
-            <p className="hero-copy subtle">This deck scans live weather contracts, compares exchange pricing against weather models, and lets you develop full paper-trade plans with execution controls, change tracking, and scenario discipline.</p>
+            <h1>Run the weather desk like a live terminal, not a stack of cards.</h1>
+            <p className="hero-copy subtle">This console scans live weather contracts, compares exchange pricing against weather models, and keeps bot state, account posture, tape movement, and paper execution in one dense operating surface.</p>
             <div className="hero-ribbon">
-              <span className="badge soft">Last scan {formatClock(lastScanAt || meta?.refreshedAt)}</span>
+              <span className="badge soft">scan@{formatClock(lastScanAt || meta?.refreshedAt)}</span>
               <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} live contracts on scope` : 'Building scope'}</span>
-              <span className="badge soft">Sources {meta?.weatherSourceMix.join(' · ') ?? 'Live feeds'}</span>
+              <span className="badge soft">feeds {meta?.weatherSourceMix.join(' · ') ?? 'Live feeds'}</span>
             </div>
             <p className="hero-status subtle">{scanState}</p>
           </div>
@@ -1050,6 +1124,97 @@ function App() {
         </section>
 
         {error && <section className="panel system-banner tone-bad"><strong>System advisory</strong><span>{error}</span></section>}
+
+        <section className="panel account-command-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Paper account command</p>
+              <h2>Simulated equity and bot-managed capital</h2>
+              <p className="subtle panel-intro">This is the paper stack the desk is managing, shown as a simple account view instead of scattered blotter fragments. Starting capital is {formatUsd(paperAccount.startingCash)} and updates come from the same blotter, orders, and bot runtime already driving the desk.</p>
+            </div>
+            <div className="table-actions">
+              <span className={`status-pill ${paperAccount.automationStatus === 'active' ? 'tone-good' : 'tone-warn'}`}>{paperAccount.automationStatus === 'active' ? 'Bot managing capital' : 'Bot paused'}</span>
+              <span className="badge soft">{paperAccount.botManagedMarkets} bot-managed lanes</span>
+            </div>
+          </div>
+
+          <div className="execution-summary-grid review-metrics paper-account-grid">
+            <ExecutionSummaryCard label="Account value" value={formatUsd(paperAccount.accountValue)} detail={`${formatUsd(paperAccount.startingCash)} start · ${paperAccount.totalPnl >= 0 ? '+' : '-'}${formatUsd(Math.abs(paperAccount.totalPnl))} total PnL`} toneClass={paperAccount.totalPnl >= 0 ? 'positive' : 'negative'} />
+            <ExecutionSummaryCard label="Cash" value={formatUsd(paperAccount.cash)} detail={`${formatUsd(paperAccount.availableCash)} available after ${formatUsd(paperAccount.reservedCash)} working capital reserve`} toneClass={paperAccount.cash >= 0 ? 'positive' : 'negative'} />
+            <ExecutionSummaryCard label="Exposure" value={formatUsd(paperAccount.exposure)} detail={`${paperAccount.grossFilledUnits} filled units across ${paperAccount.activeMarkets} active campaigns`} />
+            <ExecutionSummaryCard label="Open PnL" value={`${paperAccount.openPnl >= 0 ? '+' : '-'}${formatUsd(Math.abs(paperAccount.openPnl))}`} detail={`${paperAccount.activeMarkets} active · ${paperAccount.queuedMarkets} queued`} toneClass={paperAccount.openPnl >= 0 ? 'positive' : 'negative'} />
+            <ExecutionSummaryCard label="Realized PnL" value={`${paperAccount.realizedPnl >= 0 ? '+' : '-'}${formatUsd(Math.abs(paperAccount.realizedPnl))}`} detail={paperAccount.closedMarkets ? `${paperAccount.closedMarkets} closed campaigns booked.` : 'No realized closes booked yet.'} toneClass={paperAccount.realizedPnl >= 0 ? 'positive' : 'negative'} />
+            <ExecutionSummaryCard label="Bot-managed capital" value={formatUsd(paperAccount.botManagedCapital)} detail={`${Math.round(paperAccount.botManagedPct * 100)}% of paper equity is currently under automation control.`} toneClass={paperAccount.automationStatus === 'active' ? 'positive' : undefined} />
+          </div>
+
+          <div className="review-diagnostics-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Capital posture</span>
+                  <p className="subtle">A fast read on where the simulated account stands right now.</p>
+                </div>
+              </div>
+              <div className="stack-list compact-review-list">
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>{paperAccount.availableCash >= 0 ? 'Buying power is intact' : 'Buying power is over-allocated'}</strong>
+                      <span className={`status-pill tone-${paperAccount.availableCash >= 0 ? 'good' : 'bad'}`}>{formatUsd(paperAccount.availableCash)} free</span>
+                    </div>
+                    <p>{paperAccount.availableCash >= 0 ? `The paper desk still has ${formatUsd(paperAccount.availableCash)} free after reserving staged orders.` : `Working orders are reserving more than current free cash. Trim tickets before adding risk.`}</p>
+                  </div>
+                </div>
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Deployed versus reserved</strong>
+                      <span className="status-pill tone-muted">{formatUsd(paperAccount.deployedCash)} committed</span>
+                    </div>
+                    <p>{formatUsd(paperAccount.exposure)} is marked in live exposure and {formatUsd(paperAccount.reservedCash)} is still parked in working orders.</p>
+                  </div>
+                </div>
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Automation framing</strong>
+                      <span className={`status-pill ${paperAccount.automationStatus === 'active' ? 'tone-good' : 'tone-warn'}`}>{paperAccount.automationStatus === 'active' ? 'Managed' : 'Manual only'}</span>
+                    </div>
+                    <p>{paperAccount.automationStatus === 'active' ? `The bot is actively shepherding ${paperAccount.botManagedMarkets} lanes and ${formatUsd(paperAccount.botManagedCapital)} of paper capital.` : 'The bot is paused, so the account is being tracked manually even though blotter and queue state remain intact.'}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Largest capital lanes</span>
+                  <p className="subtle">Where the paper account is actually tied up.</p>
+                </div>
+                <span className="badge soft">Top {Math.min(4, paperAccount.markets.length)}</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                {paperAccount.markets.slice(0, 4).length ? paperAccount.markets.slice(0, 4).map((market) => (
+                  <div className="stack-row review-row" key={market.marketId}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{market.marketTitle}</strong>
+                        <span className={`status-pill ${market.state === 'active' ? 'tone-good' : market.state === 'queued' ? 'tone-warn' : 'tone-muted'}`}>{market.state.toUpperCase()}</span>
+                      </div>
+                      <p>{formatUsd(market.markValue)} marked exposure · {formatUsd(market.reservedCash)} reserved · {market.filledUnits} filled units · {market.workingUnits} working units.</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>Open {market.openPnl >= 0 ? '+' : '-'}{formatUsd(Math.abs(market.openPnl))}</small>
+                      <small>Realized {market.realizedPnl >= 0 ? '+' : '-'}{formatUsd(Math.abs(market.realizedPnl))}</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">No paper capital is deployed yet.</p>}
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className={`panel system-banner ${persistenceStatus.mode === 'firestore' ? 'tone-good' : 'tone-warn'}`}>
           <strong>{persistenceStatus.mode === 'firestore' ? 'Backend persistence online' : 'Local-only persistence'}</strong>
           <span>{persistenceStatus.detail}</span>
@@ -1178,6 +1343,84 @@ function App() {
           </div>
         </section>
         {loading && <section className="panel system-banner"><strong>Mission board loading</strong><span>Pulling contracts, quotes, and weather-model inputs.</span></section>}
+
+        <section className="panel review-panel execution-visibility-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Paper execution visibility</p>
+              <h2>Bot fills, positions, and PnL at a glance</h2>
+              <p className="subtle panel-intro">This is a read-only paper ledger view. It makes staged orders, local fills, active positions, and realized versus marked PnL obvious without introducing any live trading controls.</p>
+            </div>
+            <div className="table-actions">
+              <span className="badge soft">Paper-only</span>
+              <span className="badge soft">{livePositionSummary.totalFilledUnits} filled units</span>
+            </div>
+          </div>
+
+          <div className="execution-summary-grid review-metrics execution-glance-grid">
+            <ExecutionSummaryCard label="Working orders" value={String(livePositionSummary.workingOrders)} detail={`${livePositionSummary.partialOrders} partially filled`} toneClass={livePositionSummary.workingOrders ? 'positive' : undefined} />
+            <ExecutionSummaryCard label="Filled orders" value={String(livePositionSummary.filledOrders)} detail={`${livePositionSummary.totalFilledUnits} units executed locally`} toneClass={livePositionSummary.filledOrders ? 'positive' : undefined} />
+            <ExecutionSummaryCard label="Open positions" value={`${livePositionSummary.activePositions} active / ${livePositionSummary.queuedPositions} queued`} detail={`${livePositionSummary.closedPositions} closed in ledger`} toneClass={livePositionSummary.activePositions ? 'positive' : undefined} />
+            <ExecutionSummaryCard label="Open marked PnL" value={signedPct(livePositionSummary.markedOpen)} detail="Across queued and active blotter entries." toneClass={livePositionSummary.markedOpen >= 0 ? 'positive' : 'negative'} />
+            <ExecutionSummaryCard label="Realized PnL" value={signedPct(livePositionSummary.realized)} detail="Closed paper trades only." toneClass={livePositionSummary.realized >= 0 ? 'positive' : 'negative'} />
+          </div>
+
+          <div className="review-diagnostics-grid execution-visibility-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Live position spotlight</span>
+                  <p className="subtle">Open paper positions sorted by how much PnL is moving right now.</p>
+                </div>
+                <span className="badge soft">{positionSpotlight.length} shown</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                {positionSpotlight.length ? positionSpotlight.map((entry) => (
+                  <button key={entry.marketId} type="button" className={`review-selector ${selectedMarket?.id === entry.marketId ? 'selected' : ''}`} onClick={() => setSelectedId(entry.marketId)}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{entry.marketTitle}</strong>
+                        <span className={`status-pill ${entry.state === 'active' ? 'tone-good' : 'tone-warn'}`}>{entry.state.toUpperCase()}</span>
+                      </div>
+                      <p>{entry.direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} · Entry {quotePct(entry.entryPrice)} · Mark {quotePct(entry.currentMark)} · {entry.exitSuggestion.summary}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>Marked {entry.markedPnlPoints === null ? '--' : signedPct(entry.markedPnlPoints)}</small>
+                      <small>Realized {entry.realizedPnlPoints === null ? '--' : signedPct(entry.realizedPnlPoints)}</small>
+                    </div>
+                  </button>
+                )) : <p className="subtle">No open paper positions yet.</p>}
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Recent bot activity</span>
+                  <p className="subtle">Combines recent fills, position state changes, and bot run audits into one unmistakable tape.</p>
+                </div>
+                <span className="badge soft">{botActivityFeed.length} events</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                {botActivityFeed.length ? botActivityFeed.map((item) => (
+                  <div className="stack-row review-row" key={item.id}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{item.title}</strong>
+                        <span className={`status-pill tone-${item.tone}`}>{item.kind === 'fill' ? 'Fill' : item.kind === 'bot-run' ? 'Bot' : 'Position'}</span>
+                      </div>
+                      <p>{item.detail}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>{formatClock(item.at)}</small>
+                      <small>{formatDateTime(item.at)}</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">The activity tape will populate after the first paper order or bot tick.</p>}
+              </div>
+            </div>
+          </div>
+        </section>
 
         <section className="panel ops-priority-panel">
           <div className="panel-header">
