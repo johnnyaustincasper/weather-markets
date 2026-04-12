@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getMockMarkets } from './data/mockMarkets';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
-import { getPaperBlotter, repricePaperBlotter, syncPaperBlotter, type PaperBlotterEntry } from './services/paperBlotter';
+import {
+  getPaperBlotter,
+  repricePaperBlotter,
+  summarizePaperPerformance,
+  syncPaperBlotter,
+  type PaperBlotterEntry,
+} from './services/paperBlotter';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
 import { cancelPaperOrder, getPaperOrders, placePaperOrder, syncPaperOrders, type PaperOrder } from './services/paperOrders';
 import {
@@ -327,6 +333,7 @@ function App() {
   const selectedTrend = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
   const selectedHistory = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
+  const paperPerformance = useMemo(() => summarizePaperPerformance(paperBlotter), [paperBlotter]);
 
   useEffect(() => {
     setPaperBlotter(syncPaperBlotter(displayMarkets, paperState, paperPlans, paperExecutionProfile));
@@ -337,6 +344,9 @@ function App() {
   const watchCount = displayMarkets.filter((market) => market.dataOrigin === 'curated-watchlist' || paperPlans[market.id]?.decision === 'watch').length;
   const topTrade = displayMarkets[0];
   const paperQueueCount = Object.values(paperState).filter((item) => item.state === 'queued' || item.state === 'active').length;
+  const performanceHeadline = paperPerformance.totals.closed
+    ? `${paperPerformance.totals.wins}-${paperPerformance.totals.losses}${paperPerformance.totals.flats ? `-${paperPerformance.totals.flats}` : ''}`
+    : 'No closes yet';
   const showingFallbackFirst = !liveGoodMatches.length;
   const scanState = error
     ? 'Scanner offline, showing cached state until feeds recover.'
@@ -686,6 +696,45 @@ function App() {
           </div>
         </section>
 
+        <section className="panel review-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Performance review</p>
+              <h2>Did the ranked setups actually work?</h2>
+              <p className="subtle panel-intro">This local review layer keeps realized outcomes for closed paper trades and marked PnL for open ones, so you can see whether the scanner is earning the right to be trusted.</p>
+            </div>
+            <div className="table-actions">
+              <span className="badge soft">{paperPerformance.totals.closed} closed</span>
+              <span className="badge soft">{paperPerformance.lastClosedAt ? `Last close ${formatClock(paperPerformance.lastClosedAt)}` : 'No closed trades yet'}</span>
+            </div>
+          </div>
+
+          <div className="execution-summary-grid review-metrics">
+            <ExecutionSummaryCard label="Win rate" value={paperPerformance.totals.winRate === null ? '--' : pct(paperPerformance.totals.winRate)} detail={`${paperPerformance.totals.wins} wins · ${paperPerformance.totals.losses} losses · ${paperPerformance.totals.flats} flat`} />
+            <ExecutionSummaryCard label="Avg entry edge" value={paperPerformance.totals.avgEntryEdge === null ? '--' : signedPct(paperPerformance.totals.avgEntryEdge)} detail="Average scanner edge at trade open." />
+            <ExecutionSummaryCard label="Realized PnL" value={signedPct(paperPerformance.totals.totalRealizedPnl)} detail={paperPerformance.totals.closed ? `${paperPerformance.totals.closed} closed paper trades.` : 'Nothing realized yet.'} toneClass={paperPerformance.totals.totalRealizedPnl >= 0 ? 'positive' : 'negative'} />
+            <ExecutionSummaryCard label="Marked PnL" value={signedPct(paperPerformance.totals.totalMarkedPnl)} detail={`${paperPerformance.totals.open} active · ${paperPerformance.totals.queued} queued`} toneClass={paperPerformance.totals.totalMarkedPnl >= 0 ? 'positive' : 'negative'} />
+          </div>
+
+          <div className="stack-list">
+            {paperPerformance.bySetupType.length ? paperPerformance.bySetupType.map((bucket) => (
+              <div className="stack-row review-row" key={bucket.key}>
+                <div>
+                  <div className="source-title-row">
+                    <strong>{setupTypeLabel(bucket.key)}</strong>
+                    <span className="status-pill tone-muted">{bucket.total} tracked</span>
+                  </div>
+                  <p>{bucket.closed ? `${pct(bucket.winRate ?? 0)} win rate · ${signedPct(bucket.totalRealizedPnl)} realized · ${signedPct(bucket.totalMarkedPnl)} marked.` : `No closed trades yet, ${bucket.open} active and ${bucket.queued} queued.`}</p>
+                </div>
+                <div className="source-metrics">
+                  <small>Avg edge {bucket.avgEntryEdge === null ? '--' : signedPct(bucket.avgEntryEdge)}</small>
+                  <small>Avg realized {bucket.avgRealizedPnl === null ? '--' : signedPct(bucket.avgRealizedPnl)}</small>
+                </div>
+              </div>
+            )) : <p className="subtle">Queue or close paper trades to unlock setup-level review.</p>}
+          </div>
+        </section>
+
         <section className="footer-strip">
           <div className="panel summary-card">
             <span className="summary-label">Primary objective</span>
@@ -701,6 +750,11 @@ function App() {
             <span className="summary-label">Working tickets</span>
             <strong>{Object.values(paperOrders).flat().filter((order) => order.status === 'working').length} staged</strong>
             <span className="subtle">{Object.values(paperOrders).flat().find((order) => order.status === 'working')?.marketTitle ?? 'No active paper orders waiting in the book.'}</span>
+          </div>
+          <div className="panel summary-card">
+            <span className="summary-label">Paper outcomes</span>
+            <strong>{performanceHeadline}</strong>
+            <span className="subtle">{paperPerformance.totals.closed ? `${pct(paperPerformance.totals.winRate ?? 0)} win rate · ${signedPct(paperPerformance.totals.totalRealizedPnl)} realized.` : 'Close a few paper trades to start scoring your edge.'}</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Coverage</span>
@@ -846,6 +900,14 @@ function paperStateToneClass(state?: PaperPositionState) {
   if (state === 'queued') return 'tone-warn';
   if (state === 'closed') return 'tone-muted';
   return 'tone-muted';
+}
+
+function setupTypeLabel(value: string) {
+  if (value === 'temperatureMax') return 'Temperature max';
+  if (value === 'windSpeed') return 'Wind speed';
+  if (value === 'namedStorm') return 'Named storm';
+  if (value === 'precipitation') return 'Precipitation';
+  return 'Other';
 }
 
 export default App;

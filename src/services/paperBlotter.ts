@@ -20,13 +20,19 @@ export type PaperBlotterJournalEntry = {
 export type PaperBlotterEntry = {
   marketId: string;
   marketTitle: string;
+  setupType: WeatherMarket['resolutionSchema']['kind'];
   direction: PaperTradePlan['direction'];
   state: PaperPositionState;
   thesisSnapshot: string;
   entryPrice: number | null;
   currentMark: number | null;
+  closePrice: number | null;
   pnlPoints: number | null;
   pnlPercentOnRisk: number | null;
+  realizedPnlPoints: number | null;
+  realizedPnlPercentOnRisk: number | null;
+  markedPnlPoints: number | null;
+  outcome: 'win' | 'loss' | 'flat' | 'open' | 'queued';
   queuedAt: string | null;
   activatedAt: string | null;
   closedAt: string | null;
@@ -46,6 +52,30 @@ export type PaperBlotterEntry = {
     triggeredAt: string | null;
   };
   journal: PaperBlotterJournalEntry[];
+};
+
+export type PaperPerformanceBucket = {
+  key: string;
+  label: string;
+  total: number;
+  closed: number;
+  open: number;
+  wins: number;
+  losses: number;
+  flats: number;
+  queued: number;
+  winRate: number | null;
+  avgEntryEdge: number | null;
+  avgRealizedPnl: number | null;
+  avgMarkedPnl: number | null;
+  totalRealizedPnl: number;
+  totalMarkedPnl: number;
+};
+
+export type PaperPerformanceSummary = {
+  totals: PaperPerformanceBucket;
+  bySetupType: PaperPerformanceBucket[];
+  lastClosedAt: string | null;
 };
 
 const STORAGE_KEY = 'weather-markets-paper-blotter:v1';
@@ -168,6 +198,43 @@ function exitSuggestionFor(direction: PaperTradePlan['direction'], currentMark: 
   };
 }
 
+function classifyOutcome(state: PaperPositionState, pnlPoints: number | null) {
+  if (state === 'queued') return 'queued' as const;
+  if (state !== 'closed') return 'open' as const;
+  if (pnlPoints === null || Math.abs(pnlPoints) < 0.0001) return 'flat' as const;
+  return pnlPoints > 0 ? 'win' as const : 'loss' as const;
+}
+
+function buildBucket(key: string, label: string, entries: PaperBlotterEntry[]): PaperPerformanceBucket {
+  const closed = entries.filter((entry) => entry.state === 'closed');
+  const wins = closed.filter((entry) => entry.outcome === 'win').length;
+  const losses = closed.filter((entry) => entry.outcome === 'loss').length;
+  const flats = closed.filter((entry) => entry.outcome === 'flat').length;
+  const open = entries.filter((entry) => entry.state === 'active').length;
+  const queued = entries.filter((entry) => entry.state === 'queued').length;
+  const totalRealizedPnl = Number(closed.reduce((sum, entry) => sum + (entry.realizedPnlPoints ?? 0), 0).toFixed(4));
+  const totalMarkedPnl = Number(entries.reduce((sum, entry) => sum + (entry.markedPnlPoints ?? 0), 0).toFixed(4));
+  const avg = (values: number[]) => values.length ? Number((values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(4)) : null;
+
+  return {
+    key,
+    label,
+    total: entries.length,
+    closed: closed.length,
+    open,
+    wins,
+    losses,
+    flats,
+    queued,
+    winRate: closed.length ? wins / closed.length : null,
+    avgEntryEdge: avg(entries.map((entry) => entry.entryEdge)),
+    avgRealizedPnl: avg(closed.map((entry) => entry.realizedPnlPoints ?? 0)),
+    avgMarkedPnl: avg(entries.map((entry) => entry.markedPnlPoints ?? 0)),
+    totalRealizedPnl,
+    totalMarkedPnl,
+  };
+}
+
 export function getPaperBlotter() {
   return readStore();
 }
@@ -186,7 +253,7 @@ export function repricePaperBlotter(markets: WeatherMarket[], paperState: Record
     if (!paperRecord || !market || !plan || paperRecord.state === 'flat') continue;
 
     const executionSettings = mergePaperExecutionSettings(executionProfile, marketId);
-    const entryPrice = entryPriceFor(market, plan.direction, executionSettings);
+    const entryPrice = existing.entryPrice ?? entryPriceFor(market, plan.direction, executionSettings);
     const currentMark = currentMarkFor(market);
     const pnlPoints = signedPnL(plan.direction, entryPrice, currentMark);
     const stopPrice = stopPriceFor(plan.direction, entryPrice, executionSettings);
@@ -204,21 +271,29 @@ export function repricePaperBlotter(markets: WeatherMarket[], paperState: Record
       summary: `Repriced local paper blotter from ${previousLabel} to ${nextLabel}, entry ${entryPrice === null ? '--' : `${Math.round(entryPrice * 100)}%`} and risk rails refreshed.`,
     });
 
+    const realizedPnlPoints = paperRecord.state === 'closed' ? (existing.realizedPnlPoints ?? pnlPoints) : existing.realizedPnlPoints;
+
     nextStore[marketId] = {
       ...existing,
       marketTitle: market.title,
+      setupType: market.resolutionSchema.kind,
       direction: plan.direction,
       state: paperRecord.state,
       thesisSnapshot: plan.thesis,
       entryPrice,
       currentMark,
+      closePrice: paperRecord.state === 'closed' ? (existing.closePrice ?? currentMark) : existing.closePrice,
       pnlPoints,
       pnlPercentOnRisk: pnlPoints === null ? null : pnlPoints * 100,
+      realizedPnlPoints,
+      realizedPnlPercentOnRisk: realizedPnlPoints === null ? null : realizedPnlPoints * 100,
+      markedPnlPoints: pnlPoints,
+      outcome: classifyOutcome(paperRecord.state, realizedPnlPoints),
       lastMarkedAt: repricedAt,
       lastRepricedAt: repricedAt,
-      entryEdge: market.edge,
+      entryEdge: existing.entryEdge,
       currentEdge: market.edge,
-      entryConfidence: market.confidence,
+      entryConfidence: existing.entryConfidence,
       currentConfidence: market.confidence,
       stopPrice,
       takeProfitPrice,
@@ -289,17 +364,25 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
       });
     }
 
+    const realizedPnlPoints = state === 'closed' ? (existing?.realizedPnlPoints ?? pnlPoints) : existing?.realizedPnlPoints ?? null;
+
     nextStore[market.id] = {
       marketId: market.id,
       marketTitle: market.title,
+      setupType: market.resolutionSchema.kind,
       direction: plan.direction,
       executionSettings,
       state,
       thesisSnapshot: existing?.thesisSnapshot ?? plan.thesis,
       entryPrice,
       currentMark,
+      closePrice: state === 'closed' ? (existing?.closePrice ?? currentMark) : existing?.closePrice ?? null,
       pnlPoints,
       pnlPercentOnRisk: pnlPoints === null ? null : pnlPoints * 100,
+      realizedPnlPoints,
+      realizedPnlPercentOnRisk: realizedPnlPoints === null ? null : realizedPnlPoints * 100,
+      markedPnlPoints: pnlPoints,
+      outcome: classifyOutcome(state, realizedPnlPoints ?? pnlPoints),
       queuedAt: state === 'queued' ? existing?.queuedAt ?? paperRecord.updatedAt : existing?.queuedAt ?? null,
       activatedAt: state === 'active' ? existing?.activatedAt ?? paperRecord.updatedAt : existing?.activatedAt ?? null,
       closedAt: state === 'closed' ? existing?.closedAt ?? paperRecord.updatedAt : existing?.closedAt ?? null,
@@ -333,6 +416,10 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
     nextStore[marketId] = {
       ...existing,
       state: 'closed',
+      closePrice: existing.closePrice ?? existing.currentMark,
+      realizedPnlPoints: existing.realizedPnlPoints ?? existing.pnlPoints,
+      realizedPnlPercentOnRisk: existing.realizedPnlPercentOnRisk ?? (existing.pnlPoints === null ? null : existing.pnlPoints * 100),
+      outcome: classifyOutcome('closed', existing.realizedPnlPoints ?? existing.pnlPoints),
       closedAt: existing.closedAt ?? paperRecord.updatedAt,
       journal,
     };
@@ -340,4 +427,31 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
 
   writeStore(nextStore);
   return nextStore;
+}
+
+export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEntry>): PaperPerformanceSummary {
+  const entries = Object.values(blotter);
+  const groups = new Map<string, PaperBlotterEntry[]>();
+
+  for (const entry of entries) {
+    const list = groups.get(entry.setupType) ?? [];
+    list.push(entry);
+    groups.set(entry.setupType, list);
+  }
+
+  const bySetupType = Array.from(groups.entries())
+    .map(([key, bucketEntries]) => buildBucket(key, key, bucketEntries))
+    .sort((left, right) => right.totalRealizedPnl - left.totalRealizedPnl || right.closed - left.closed);
+
+  const closedTimes = entries
+    .map((entry) => entry.closedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort();
+  const lastClosedAt = closedTimes.length ? closedTimes[closedTimes.length - 1] : null;
+
+  return {
+    totals: buildBucket('all', 'All setups', entries),
+    bySetupType,
+    lastClosedAt,
+  };
 }

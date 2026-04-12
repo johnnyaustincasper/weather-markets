@@ -78,6 +78,7 @@ li + li { margin-top: 0.35rem; }
 .theater-panel,
 .command-panel,
 .telemetry-panel,
+.review-panel,
 .summary-card,
 .system-banner { padding: 22px; }
 
@@ -145,7 +146,7 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .intel-grid,
 .support-grid,
 .telemetry-lanes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.footer-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.footer-strip { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .signal-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 
 .metric-card,
@@ -345,7 +346,8 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 
 .stack-list { display: grid; gap: 10px; }
 .stack-row,
-.history-row {
+.history-row,
+.review-row {
   display: flex;
   justify-content: space-between;
   gap: 14px;
@@ -384,6 +386,7 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
   .theater-panel,
   .command-panel,
   .telemetry-panel,
+  .review-panel,
   .summary-card,
   .system-banner { padding: 16px; }
   .panel,
