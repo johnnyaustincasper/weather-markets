@@ -1,4 +1,4 @@
-import type { ClobQuote, DiscoveryInfo, MarketFeedMeta, MarketQuoteUpdate, QuoteStatus, ResolutionSchema, Signal, WeatherMarket, WeatherMarketResponse } from '../types';
+import type { ClobQuote, DiscoveryInfo, MarketFeedMeta, MarketQuoteUpdate, QuoteStatus, ResolutionSchema, Signal, WeatherMarket, WeatherMarketResponse } from '../types.js';
 
 type MarketProvider = {
   getMarkets: () => Promise<WeatherMarketResponse>;

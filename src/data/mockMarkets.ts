@@ -1,4 +1,4 @@
-import type { WeatherMarket } from '../types';
+import type { WeatherMarket } from '../types.js';
 
 const nowIso = () => new Date().toISOString();
 const inHours = (hours: number) => new Date(Date.now() + hours * 60 * 60 * 1000).toLocaleString('en-US', { month: 'short', day: 'numeric' });

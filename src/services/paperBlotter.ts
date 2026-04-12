@@ -1,7 +1,7 @@
-import type { PaperTradePlan, PaperPositionState } from './paperTrading';
-import type { WeatherMarket } from '../types';
-import type { PaperExecutionProfile, PaperExecutionSettings } from './paperExecutionSettings';
-import { mergePaperExecutionSettings } from './paperExecutionSettings';
+import type { PaperTradePlan, PaperPositionState } from './paperTrading.js';
+import type { WeatherMarket } from '../types.js';
+import type { PaperExecutionProfile, PaperExecutionSettings } from './paperExecutionSettings.js';
+import { mergePaperExecutionSettings } from './paperExecutionSettings.js';
 
 type PaperTradeRecord = {
   state: PaperPositionState;

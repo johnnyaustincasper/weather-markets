@@ -85,7 +85,7 @@ The next scheduler step is now in-repo under `functions/`.
 What it does:
 - runs on a Firebase scheduled function, default `every 5 minutes`
 - can also be triggered manually through an HTTP function or a one-shot local script
-- reads `paperTradeLedgers/{ledgerId}` from Firestore
+- reads and writes the same owner-scoped Firestore ledger document used by the app, `paperTradeLedgers/{ownerUid}__{ledgerId}`
 - fetches the current weather market scan using the same market provider used by the app
 - runs the existing `runPaperBotTick(...)` paper-only loop
 - writes the updated ledger back to Firestore with backend run metadata
@@ -102,7 +102,7 @@ npm run deploy:backend
 
 Optional backend env vars:
 - `WEATHER_MARKETS_PAPER_LEDGER_ID`, default `default`
-- `WEATHER_MARKETS_RUNNER_ID`, default `firebase-scheduler`
+- `WEATHER_MARKETS_RUNNER_ID`, default `firebase-scheduler`, also used as the owner-scoped ledger id prefix for backend-managed paper ledgers
 - `WEATHER_MARKETS_CRON`, default `every 5 minutes`
 
 Deployed Firebase functions:

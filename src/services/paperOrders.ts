@@ -1,5 +1,5 @@
-import type { QuoteStatus, WeatherMarket } from '../types';
-import type { PaperTradePlan } from './paperTrading';
+import type { QuoteStatus, WeatherMarket } from '../types.js';
+import type { PaperTradePlan } from './paperTrading.js';
 
 export type PaperOrderStatus = 'working' | 'partial' | 'filled' | 'cancelled';
 

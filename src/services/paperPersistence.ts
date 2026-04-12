@@ -1,10 +1,10 @@
 import { doc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
-import { getFirestoreDb, getFirebaseProjectId, isFirebaseConfigured } from '../lib/firebase';
-import type { PaperBlotterEntry } from './paperBlotter';
-import { createPaperBotLoopState, type PaperBotLoopState } from './paperBotLoop';
-import { DEFAULT_PAPER_EXECUTION_SETTINGS, sanitizePaperExecutionSettings, type PaperExecutionProfile } from './paperExecutionSettings';
-import type { PaperOrder } from './paperOrders';
-import type { PaperPositionState } from './paperTrading';
+import { getFirestoreDb, getFirebaseProjectId, isFirebaseConfigured } from '../lib/firebase.js';
+import type { PaperBlotterEntry } from './paperBlotter.js';
+import { createPaperBotLoopState, type PaperBotLoopState } from './paperBotLoop.js';
+import { DEFAULT_PAPER_EXECUTION_SETTINGS, sanitizePaperExecutionSettings, type PaperExecutionProfile } from './paperExecutionSettings.js';
+import type { PaperOrder } from './paperOrders.js';
+import type { PaperPositionState } from './paperTrading.js';
 
 export type PaperTradeRecord = {
   state: PaperPositionState;

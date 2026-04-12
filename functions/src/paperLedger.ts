@@ -8,6 +8,10 @@ import type { PersistentPaperState } from '../../src/services/paperPersistence.j
 
 export const DEFAULT_LEDGER_COLLECTION = 'paperTradeLedgers';
 
+export function buildPaperLedgerDocumentId(ledgerId: string, ownerId: string) {
+  return `${ownerId}__${ledgerId}`;
+}
+
 export function sanitizePersistentPaperState(input: Partial<PersistentPaperState> | undefined): PersistentPaperState {
   const rawExecutionProfile = input?.paperExecutionProfile && typeof input.paperExecutionProfile === 'object'
     ? input.paperExecutionProfile as Partial<PaperExecutionProfile>

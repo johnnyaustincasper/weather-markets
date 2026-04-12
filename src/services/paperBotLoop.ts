@@ -1,7 +1,7 @@
-import type { WeatherMarket } from '../types';
-import { mergePaperExecutionSettings, type PaperExecutionProfile } from './paperExecutionSettings';
-import { buildPaperTradePlan, type PaperPositionState, type TradeDecision } from './paperTrading';
-import type { PersistentPaperState, PaperTradeRecord } from './paperPersistence';
+import type { WeatherMarket } from '../types.js';
+import { mergePaperExecutionSettings, type PaperExecutionProfile } from './paperExecutionSettings.js';
+import { buildPaperTradePlan, type PaperPositionState, type TradeDecision } from './paperTrading.js';
+import type { PersistentPaperState, PaperTradeRecord } from './paperPersistence.js';
 
 export type PaperBotRunStatus = 'idle' | 'running' | 'cooldown' | 'blocked' | 'error';
 export type PaperBotActionType = 'queued-market' | 'activated-market' | 'closed-market' | 'held-market' | 'skipped-market' | 'lease-blocked';

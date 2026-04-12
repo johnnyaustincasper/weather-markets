@@ -1,5 +1,5 @@
-import type { QuoteStatus, WeatherMarket } from '../types';
-import type { PaperExecutionSettings } from './paperExecutionSettings';
+import type { QuoteStatus, WeatherMarket } from '../types.js';
+import type { PaperExecutionSettings } from './paperExecutionSettings.js';
 
 export type TradeDecision = 'would-trade' | 'watch' | 'no-trade';
 export type TradeDirection = 'buy-yes' | 'buy-no' | 'stand-aside';

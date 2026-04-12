@@ -1,4 +1,4 @@
-import type { QuoteStatus, WeatherMarket } from '../types';
+import type { QuoteStatus, WeatherMarket } from '../types.js';
 
 export type MarketHistorySnapshot = {
   capturedAt: string;

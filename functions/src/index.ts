@@ -7,7 +7,7 @@ import { setGlobalOptions } from 'firebase-functions/v2/options';
 import { localMarketProvider } from '../../src/services/marketData.js';
 import { runPaperBotTick } from '../../src/services/paperBotLoop.js';
 import type { PersistentPaperState } from '../../src/services/paperPersistence.js';
-import { DEFAULT_LEDGER_COLLECTION, sanitizePersistentPaperState } from './paperLedger.js';
+import { buildPaperLedgerDocumentId, DEFAULT_LEDGER_COLLECTION, sanitizePersistentPaperState } from './paperLedger.js';
 
 initializeApp();
 setGlobalOptions({ maxInstances: 1, region: 'us-central1' });
@@ -29,8 +29,8 @@ export type PaperTickRunSummary = {
   finishedAt: string;
 };
 
-async function loadLedgerState(ledgerId: string): Promise<PersistentPaperState> {
-  const snapshot = await db.collection(DEFAULT_LEDGER_COLLECTION).doc(ledgerId).get();
+async function loadLedgerState(documentId: string): Promise<PersistentPaperState> {
+  const snapshot = await db.collection(DEFAULT_LEDGER_COLLECTION).doc(documentId).get();
   if (!snapshot.exists) {
     return sanitizePersistentPaperState({ source: 'firestore' });
   }
@@ -42,11 +42,12 @@ export async function runPaperBotTickOnce(params?: { ledgerId?: string; ownerId?
   const startedAt = new Date().toISOString();
   const ledgerId = params?.ledgerId?.trim() || DEFAULT_LEDGER_ID;
   const ownerId = params?.ownerId?.trim() || DEFAULT_OWNER_ID;
-  const persistencePath = `${DEFAULT_LEDGER_COLLECTION}/${ledgerId}`;
+  const documentId = buildPaperLedgerDocumentId(ledgerId, ownerId);
+  const persistencePath = `${DEFAULT_LEDGER_COLLECTION}/${documentId}`;
 
   const [marketsResponse, state] = await Promise.all([
     localMarketProvider.getMarkets(),
-    loadLedgerState(ledgerId),
+    loadLedgerState(documentId),
   ]);
 
   const result = runPaperBotTick({
@@ -57,8 +58,11 @@ export async function runPaperBotTickOnce(params?: { ledgerId?: string; ownerId?
   });
 
   const finishedAt = new Date().toISOString();
-  await db.collection(DEFAULT_LEDGER_COLLECTION).doc(ledgerId).set({
+  await db.collection(DEFAULT_LEDGER_COLLECTION).doc(documentId).set({
     ...result.state,
+    ownerUid: result.state.ownerUid ?? ownerId,
+    baseLedgerId: ledgerId,
+    documentId,
     source: 'firestore',
     backend: {
       runner: ownerId,
