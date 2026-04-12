@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
-import { getPaperBlotter, syncPaperBlotter, type PaperBlotterEntry } from './services/paperBlotter';
+import { getPaperBlotter, repricePaperBlotter, syncPaperBlotter, type PaperBlotterEntry } from './services/paperBlotter';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
 import {
   DEFAULT_PAPER_EXECUTION_SETTINGS,
@@ -368,6 +368,7 @@ function App() {
   const [paperState, setPaperState] = useState<Record<string, PaperTradeRecord>>(() => loadPaperState());
   const [paperExecutionProfile, setPaperExecutionProfile] = useState<PaperExecutionProfile>(() => loadPaperExecutionProfile());
   const [paperBlotter, setPaperBlotter] = useState<Record<string, PaperBlotterEntry>>(() => getPaperBlotter());
+  const [paperRepriceMeta, setPaperRepriceMeta] = useState<{ at: string; changedCount: number } | null>(null);
 
   const fetchMarkets = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -595,6 +596,12 @@ function App() {
         note: state === 'flat' ? 'Reset to flat paper state.' : state === 'queued' ? 'Queued for paper entry review.' : state === 'active' ? 'Paper position marked active.' : 'Paper position closed locally.',
       },
     }));
+  };
+
+  const handleRepricePaperBlotter = () => {
+    const result = repricePaperBlotter(markets, paperState, paperPlans, paperExecutionProfile);
+    setPaperBlotter(result.blotter);
+    setPaperRepriceMeta({ at: result.repricedAt, changedCount: result.changedCount });
   };
 
   return (
@@ -968,7 +975,10 @@ function App() {
                             <span className="detail-label">Global paper execution</span>
                             <p className="subtle">Applies across the local blotter unless a market override is set.</p>
                           </div>
+                          <button className="watch-toggle" onClick={handleRepricePaperBlotter}>Reprice blotter</button>
                         </div>
+                        <p className="subtle">Changing sliders updates new paper assumptions immediately. Use Reprice blotter to rerun existing local positions under the latest settings.</p>
+                        {paperRepriceMeta && <p className="subtle">Last repriced {formatClock(paperRepriceMeta.at)} for {paperRepriceMeta.changedCount} stored positions.</p>}
                         <PaperExecutionSettingsForm settings={paperExecutionProfile.global} onChange={updateGlobalPaperSetting} />
                       </div>
                       <div className="checklist-card">
@@ -1021,10 +1031,13 @@ function App() {
                             <span className="detail-label">Paper blotter</span>
                             <p className="subtle">Entry, marks, timestamps, and journal stay local in this browser only.</p>
                           </div>
-                          <span className={`status-chip ${blotterRecord.exitSuggestion.shouldClose ? (blotterRecord.exitSuggestion.reason === 'take-profit' ? 'tone-good' : 'tone-warn') : 'tone-muted'}`}>{blotterRecord.exitSuggestion.summary}</span>
+                          <div className="table-actions">
+                            <button className="watch-toggle" onClick={handleRepricePaperBlotter}>Recompute with current settings</button>
+                            <span className={`status-chip ${blotterRecord.exitSuggestion.shouldClose ? (blotterRecord.exitSuggestion.reason === 'take-profit' ? 'tone-good' : 'tone-warn') : 'tone-muted'}`}>{blotterRecord.exitSuggestion.summary}</span>
+                          </div>
                         </div>
                         <div className="execution-summary-grid">
-                          <ExecutionSummaryCard label="Entry mark" value={quotePct(blotterRecord.entryPrice)} detail={`Queued ${formatClock(blotterRecord.queuedAt ?? undefined)} · active ${formatClock(blotterRecord.activatedAt ?? undefined)}`} />
+                          <ExecutionSummaryCard label="Entry mark" value={quotePct(blotterRecord.entryPrice)} detail={`Queued ${formatClock(blotterRecord.queuedAt ?? undefined)} · active ${formatClock(blotterRecord.activatedAt ?? undefined)}${blotterRecord.lastRepricedAt ? ` · repriced ${formatClock(blotterRecord.lastRepricedAt)}` : ''}`} />
                           <ExecutionSummaryCard label="Current mark" value={quotePct(blotterRecord.currentMark)} detail={`Last marked ${formatClock(blotterRecord.lastMarkedAt ?? undefined)}`} />
                           <ExecutionSummaryCard label="Paper PnL" value={signedQuotePct(blotterRecord.pnlPoints)} detail={blotterRecord.pnlPercentOnRisk === null ? 'Need a valid mark to score PnL.' : `${Math.round(blotterRecord.pnlPercentOnRisk)} bps on entry price`} toneClass={(blotterRecord.pnlPoints ?? 0) >= 0 ? 'positive' : 'negative'} />
                           <ExecutionSummaryCard label="Risk rails" value={`${quotePct(blotterRecord.stopPrice)} stop`} detail={`Take profit ${quotePct(blotterRecord.takeProfitPrice)} · ${blotterRecord.executionSettings.fillReference.toUpperCase()} + ${blotterRecord.executionSettings.slippageBps} bps`} toneClass={blotterRecord.exitSuggestion.shouldClose ? 'negative' : undefined} />

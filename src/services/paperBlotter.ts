@@ -13,7 +13,7 @@ export type PaperExitReason = 'take-profit' | 'stop-loss' | 'monitor';
 
 export type PaperBlotterJournalEntry = {
   at: string;
-  kind: 'state-change' | 'mark' | 'suggestion';
+  kind: 'state-change' | 'mark' | 'suggestion' | 'reprice';
   summary: string;
 };
 
@@ -31,6 +31,7 @@ export type PaperBlotterEntry = {
   activatedAt: string | null;
   closedAt: string | null;
   lastMarkedAt: string | null;
+  lastRepricedAt: string | null;
   entryEdge: number;
   currentEdge: number;
   entryConfidence: number;
@@ -99,6 +100,15 @@ function currentMarkFor(market: WeatherMarket) {
   return market.clobQuote?.midpoint ?? market.clobQuote?.lastTradePrice ?? market.impliedProbability ?? null;
 }
 
+function buildMonitorExitSuggestion(state: PaperPositionState) {
+  return {
+    shouldClose: false,
+    reason: 'monitor' as const,
+    summary: state === 'queued' ? 'Queued locally, waiting for activation.' : 'Closed locally, no further action.',
+    triggeredAt: null,
+  };
+}
+
 function signedPnL(direction: PaperTradePlan['direction'], entryPrice: number | null, currentMark: number | null) {
   if (entryPrice === null || currentMark === null || direction === 'stand-aside') return null;
   return direction === 'buy-yes' ? currentMark - entryPrice : entryPrice - currentMark;
@@ -162,6 +172,67 @@ export function getPaperBlotter() {
   return readStore();
 }
 
+export function repricePaperBlotter(markets: WeatherMarket[], paperState: Record<string, PaperTradeRecord>, paperPlans: Record<string, PaperTradePlan>, executionProfile: PaperExecutionProfile) {
+  const store = readStore();
+  const marketMap = Object.fromEntries(markets.map((market) => [market.id, market]));
+  const nextStore: Record<string, PaperBlotterEntry> = { ...store };
+  const repricedAt = new Date().toISOString();
+  let changedCount = 0;
+
+  for (const [marketId, existing] of Object.entries(store)) {
+    const paperRecord = paperState[marketId];
+    const market = marketMap[marketId];
+    const plan = paperPlans[marketId];
+    if (!paperRecord || !market || !plan || paperRecord.state === 'flat') continue;
+
+    const executionSettings = mergePaperExecutionSettings(executionProfile, marketId);
+    const entryPrice = entryPriceFor(market, plan.direction, executionSettings);
+    const currentMark = currentMarkFor(market);
+    const pnlPoints = signedPnL(plan.direction, entryPrice, currentMark);
+    const stopPrice = stopPriceFor(plan.direction, entryPrice, executionSettings);
+    const takeProfitPrice = takeProfitPriceFor(plan.direction, entryPrice, executionSettings);
+    const exitSuggestion = paperRecord.state === 'active'
+      ? exitSuggestionFor(plan.direction, currentMark, stopPrice, takeProfitPrice, market)
+      : buildMonitorExitSuggestion(paperRecord.state);
+
+    let journal = existing.journal ?? [];
+    const previousLabel = `${existing.executionSettings.fillReference.toUpperCase()} + ${existing.executionSettings.slippageBps} bps`;
+    const nextLabel = `${executionSettings.fillReference.toUpperCase()} + ${executionSettings.slippageBps} bps`;
+    journal = appendJournal(journal, {
+      at: repricedAt,
+      kind: 'reprice',
+      summary: `Repriced local paper blotter from ${previousLabel} to ${nextLabel}, entry ${entryPrice === null ? '--' : `${Math.round(entryPrice * 100)}%`} and risk rails refreshed.`,
+    });
+
+    nextStore[marketId] = {
+      ...existing,
+      marketTitle: market.title,
+      direction: plan.direction,
+      state: paperRecord.state,
+      thesisSnapshot: plan.thesis,
+      entryPrice,
+      currentMark,
+      pnlPoints,
+      pnlPercentOnRisk: pnlPoints === null ? null : pnlPoints * 100,
+      lastMarkedAt: repricedAt,
+      lastRepricedAt: repricedAt,
+      entryEdge: market.edge,
+      currentEdge: market.edge,
+      entryConfidence: market.confidence,
+      currentConfidence: market.confidence,
+      stopPrice,
+      takeProfitPrice,
+      executionSettings,
+      exitSuggestion,
+      journal,
+    };
+    changedCount += 1;
+  }
+
+  writeStore(nextStore);
+  return { blotter: nextStore, repricedAt, changedCount };
+}
+
 export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<string, PaperTradeRecord>, paperPlans: Record<string, PaperTradePlan>, executionProfile: PaperExecutionProfile) {
   const store = readStore();
   const nextStore: Record<string, PaperBlotterEntry> = { ...store };
@@ -184,12 +255,7 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
     const takeProfitPrice = existing?.takeProfitPrice ?? takeProfitPriceFor(plan.direction, entryPrice, executionSettings);
     const exitSuggestion = state === 'active'
       ? exitSuggestionFor(plan.direction, currentMark, stopPrice, takeProfitPrice, market)
-      : {
-          shouldClose: false,
-          reason: 'monitor' as const,
-          summary: state === 'queued' ? 'Queued locally, waiting for activation.' : 'Closed locally, no further action.',
-          triggeredAt: null,
-        };
+      : buildMonitorExitSuggestion(state);
 
     let journal = existing?.journal ?? [];
 
@@ -238,6 +304,7 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
       activatedAt: state === 'active' ? existing?.activatedAt ?? paperRecord.updatedAt : existing?.activatedAt ?? null,
       closedAt: state === 'closed' ? existing?.closedAt ?? paperRecord.updatedAt : existing?.closedAt ?? null,
       lastMarkedAt: nowIso,
+      lastRepricedAt: existing?.lastRepricedAt ?? null,
       entryEdge: existing?.entryEdge ?? market.edge,
       currentEdge: market.edge,
       entryConfidence: existing?.entryConfidence ?? market.confidence,
