@@ -89,7 +89,8 @@ h2 { font-size: 1.1rem; }
 .table-actions,
 .market-card-actions,
 .paper-state-actions,
-.source-title-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.source-title-row,
+.tuning-header-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 
 .hero-step {
   display: inline-flex;
@@ -128,7 +129,7 @@ h2 { font-size: 1.1rem; }
 .execution-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .focus-metrics { align-content: start; }
 .summary-grid { margin-top: 20px; }
-.summary-grid-wide { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.summary-grid-wide { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .content-grid { margin-top: 20px; }
 .core-layout { grid-template-columns: minmax(0, 1.15fr) minmax(380px, 0.85fr); align-items: start; }
 .detail-stack { display: grid; gap: 20px; }
@@ -228,6 +229,30 @@ tbody tr:hover, .active-row { background: rgba(255,255,255,0.04); }
 .mini-settings-row { grid-template-columns: 1.2fr 0.8fr; }
 .compact-form { align-content: start; }
 .tuning-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.order-ticket-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.order-ticket-grid label,
+.order-ticket-note {
+  display: grid;
+  gap: 8px;
+}
+.order-ticket-note {
+  grid-column: 1 / -1;
+}
+.order-ticket-grid input {
+  border-radius: 12px;
+  border: 1px solid rgba(255,255,255,0.1);
+  background: rgba(7,17,31,0.9);
+  color: var(--text);
+  padding: 10px 12px;
+}
+.compact-orders .source-row {
+  padding: 14px 16px;
+}
 .tuning-grid label {
   display: grid;
   gap: 8px;

@@ -3,6 +3,7 @@ import { getMockMarkets } from './data/mockMarkets';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
 import { getPaperBlotter, repricePaperBlotter, syncPaperBlotter, type PaperBlotterEntry } from './services/paperBlotter';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
+import { cancelPaperOrder, getPaperOrders, placePaperOrder, syncPaperOrders, type PaperOrder } from './services/paperOrders';
 import {
   DEFAULT_PAPER_EXECUTION_SETTINGS,
   mergePaperExecutionSettings,
@@ -40,6 +41,7 @@ const formatDateTime = (iso?: string) => {
   if (!iso) return '--';
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 };
+const clampOrderPrice = (value: number) => Math.min(0.99, Math.max(0.01, value));
 
 type MarketStatus = 'best' | 'watch' | 'candidate' | 'stale' | 'skip';
 type AlertTone = 'good' | 'warn' | 'bad';
@@ -185,6 +187,8 @@ function App() {
   const [paperState, setPaperState] = useState<Record<string, PaperTradeRecord>>(() => loadPaperState());
   const [paperExecutionProfile, setPaperExecutionProfile] = useState<PaperExecutionProfile>(() => loadPaperExecutionProfile());
   const [paperBlotter, setPaperBlotter] = useState<Record<string, PaperBlotterEntry>>(() => getPaperBlotter());
+  const [paperOrders, setPaperOrders] = useState<Record<string, PaperOrder[]>>(() => getPaperOrders());
+  const [paperOrderDrafts, setPaperOrderDrafts] = useState<Record<string, { quantity: number; limitPrice: number; note: string }>>({});
   const [paperRepriceMeta, setPaperRepriceMeta] = useState<{ at: string; changedCount: number } | null>(null);
 
   const fetchMarkets = useCallback(async (silent = false) => {
@@ -204,6 +208,7 @@ function App() {
       setLastScanAt(capturedAt);
       setError('');
       setSelectedId((current) => current || response.markets[0]?.id || '');
+      setPaperOrders(syncPaperOrders(response.markets).orders);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to load weather markets.');
     } finally {
@@ -325,6 +330,7 @@ function App() {
 
   useEffect(() => {
     setPaperBlotter(syncPaperBlotter(displayMarkets, paperState, paperPlans, paperExecutionProfile));
+    setPaperOrders(syncPaperOrders(displayMarkets).orders);
   }, [displayMarkets, paperExecutionProfile, paperPlans, paperState]);
 
   const liveTradeCount = displayMarkets.filter((market) => market.dataOrigin !== 'curated-watchlist' && paperPlans[market.id]?.decision === 'would-trade').length;
@@ -370,10 +376,40 @@ function App() {
     setPaperRepriceMeta({ at: result.repricedAt, changedCount: result.changedCount });
   };
 
+  const updateOrderDraft = (marketId: string, patch: Partial<{ quantity: number; limitPrice: number; note: string }>) => {
+    setPaperOrderDrafts((current) => {
+      const base = current[marketId] ?? { quantity: 1, limitPrice: 0.5, note: '' };
+      return { ...current, [marketId]: { ...base, ...patch } };
+    });
+  };
+
+  const handlePlacePaperOrder = () => {
+    if (!selectedMarket || !selectedPlan || selectedPlan.direction === 'stand-aside' || selectedMarket.dataOrigin === 'curated-watchlist' || !selectedOrderDraft) return;
+    const result = placePaperOrder(selectedMarket, selectedPlan, selectedOrderDraft.quantity, selectedOrderDraft.limitPrice, selectedOrderDraft.note);
+    setPaperOrders(result.orders);
+    setPaperState((current) => ({
+      ...current,
+      [selectedMarket.id]: {
+        state: 'queued',
+        updatedAt: new Date().toISOString(),
+        note: `Working ${selectedPlan.direction === 'buy-yes' ? 'YES' : 'NO'} order staged at ${pct(selectedOrderDraft.limitPrice)} for ${selectedOrderDraft.quantity} units.`,
+      },
+    }));
+  };
+
+  const handleCancelPaperOrder = (orderId: string) => {
+    if (!selectedMarket) return;
+    setPaperOrders(cancelPaperOrder(selectedMarket.id, orderId));
+  };
+
   const selectedPlan = selectedMarket ? paperPlans[selectedMarket.id] : null;
   const selectedDelta = selectedMarket ? marketDeltas[selectedMarket.id] : null;
   const selectedBlotter = selectedMarket ? paperBlotter[selectedMarket.id] : null;
   const selectedPaperState = selectedMarket ? paperState[selectedMarket.id] : null;
+  const selectedOrders = selectedMarket ? (paperOrders[selectedMarket.id] ?? []) : [];
+  const selectedOrderDraft = selectedMarket && selectedPlan
+    ? (paperOrderDrafts[selectedMarket.id] ?? { quantity: selectedPlan.sizing.suggestedUnits, limitPrice: clampOrderPrice(selectedMarket.impliedProbability), note: '' })
+    : null;
 
   return (
     <div className="app-shell">
@@ -550,6 +586,55 @@ function App() {
                       <ExecutionSummaryCard label="Current state" value={(selectedPaperState?.state ?? 'flat').toUpperCase()} detail={selectedPaperState?.note ?? 'No paper position stored for this trade yet.'} toneClass={paperStateToneClass(selectedPaperState?.state)} />
                     </div>
 
+                    {selectedMarket.dataOrigin !== 'curated-watchlist' && selectedPlan.direction !== 'stand-aside' && selectedOrderDraft && (
+                      <div className="checklist-card order-ticket-card">
+                        <div className="tuning-header-row">
+                          <div>
+                            <span className="detail-label">Paper order ticket</span>
+                            <p className="subtle">Stage a real limit price instead of just flipping the position state.</p>
+                          </div>
+                          <span className={`status-chip ${paperDecisionToneClass(selectedPlan.decision)}`}>{paperDirectionLabel(selectedPlan.direction)}</span>
+                        </div>
+                        <div className="order-ticket-grid">
+                          <label>
+                            <span>Size</span>
+                            <input type="number" min="1" max={selectedPlan.sizing.maxUnits} value={selectedOrderDraft.quantity} onChange={(event) => updateOrderDraft(selectedMarket.id, { quantity: Math.max(1, Number(event.target.value) || 1) })} />
+                          </label>
+                          <label>
+                            <span>Limit</span>
+                            <input type="number" min="0.01" max="0.99" step="0.01" value={selectedOrderDraft.limitPrice} onChange={(event) => updateOrderDraft(selectedMarket.id, { limitPrice: clampOrderPrice(Number(event.target.value) || 0.5) })} />
+                          </label>
+                          <label className="order-ticket-note">
+                            <span>Note</span>
+                            <input type="text" value={selectedOrderDraft.note} placeholder="Why this level?" onChange={(event) => updateOrderDraft(selectedMarket.id, { note: event.target.value })} />
+                          </label>
+                        </div>
+                        <div className="hero-status-row">
+                          <span className="badge soft">Live mark {quotePct(selectedMarket.clobQuote?.midpoint ?? selectedMarket.impliedProbability)}</span>
+                          <span className="badge soft">Ask {quotePct(selectedMarket.clobQuote?.bestAsk)}</span>
+                          <span className="badge soft">Bid {quotePct(selectedMarket.clobQuote?.bestBid)}</span>
+                          <button className="watch-toggle" onClick={handlePlacePaperOrder}>Stage order</button>
+                        </div>
+                        <div className="source-list compact-orders">
+                          {selectedOrders.length ? selectedOrders.map((order) => (
+                            <div className="source-row" key={order.id}>
+                              <div>
+                                <div className="source-title-row">
+                                  <strong>{order.direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} · {order.quantity}u @ {pct(order.limitPrice)}</strong>
+                                  <span className={`status-chip ${order.status === 'filled' ? 'tone-good' : order.status === 'cancelled' ? 'tone-muted' : 'tone-warn'}`}>{order.status.toUpperCase()}</span>
+                                </div>
+                                <p>{order.note}</p>
+                              </div>
+                              <div className="source-metrics">
+                                <small>{formatDateTime(order.createdAt)}</small>
+                                {order.status === 'working' && <button className="watch-toggle" onClick={() => handleCancelPaperOrder(order.id)}>Cancel</button>}
+                              </div>
+                            </div>
+                          )) : <p className="subtle">No paper orders staged yet for this contract.</p>}
+                        </div>
+                      </div>
+                    )}
+
                     <div className="mini-settings-row">
                       <PaperExecutionSettingsForm settings={paperExecutionProfile.global} onChange={updateGlobalPaperSetting} compact />
                       <div className="checklist-card">
@@ -616,6 +701,11 @@ function App() {
             <span className="summary-label">Scanner alerts</span>
             <strong>{allAlerts.length} recent changes</strong>
             <span className="subtle">{allAlerts[0]?.detail ?? 'Alerts appear once the app can compare one scan against the next.'}</span>
+          </div>
+          <div className="panel summary-card">
+            <span className="summary-label">Working paper orders</span>
+            <strong>{Object.values(paperOrders).flat().filter((order) => order.status === 'working').length} staged</strong>
+            <span className="subtle">{Object.values(paperOrders).flat().find((order) => order.status === 'working')?.marketTitle ?? 'No active paper orders waiting in the book.'}</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Market coverage</span>
