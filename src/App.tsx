@@ -733,6 +733,94 @@ function App() {
               </div>
             )) : <p className="subtle">Queue or close paper trades to unlock setup-level review.</p>}
           </div>
+
+          <div className="review-diagnostics-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Edge buckets</span>
+                  <p className="subtle">Which sizes of scanner edge are actually paying.</p>
+                </div>
+              </div>
+              <div className="stack-list compact-review-list">
+                {paperPerformance.byEdgeBucket.length ? paperPerformance.byEdgeBucket.map((bucket) => (
+                  <div className="stack-row review-row" key={bucket.key}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{bucket.label}</strong>
+                        <span className="status-pill tone-muted">{bucket.total} tracked</span>
+                      </div>
+                      <p>{bucket.closed ? `${pct(bucket.winRate ?? 0)} win rate · ${signedPct(bucket.totalRealizedPnl)} realized.` : `No closed trades yet, ${bucket.open} active and ${bucket.queued} queued.`}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>Avg edge {bucket.avgEntryEdge === null ? '--' : signedPct(bucket.avgEntryEdge)}</small>
+                      <small>Avg realized {bucket.avgRealizedPnl === null ? '--' : signedPct(bucket.avgRealizedPnl)}</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">Close trades to see whether bigger entry gaps are earning better outcomes.</p>}
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">What seems to work</span>
+                  <p className="subtle">Fast read on top and bottom areas, with simple desk lessons.</p>
+                </div>
+              </div>
+              <div className="execution-summary-grid compact-score-grid">
+                <ExecutionSummaryCard
+                  label="Best setup"
+                  value={paperPerformance.diagnostics.bestSetup?.label ?? '--'}
+                  detail={paperPerformance.diagnostics.bestSetup ? `${signedPct(paperPerformance.diagnostics.bestSetup.totalRealizedPnl)} realized across ${paperPerformance.diagnostics.bestSetup.closed} closes.` : 'Need closed trades.'}
+                  toneClass={paperPerformance.diagnostics.bestSetup && paperPerformance.diagnostics.bestSetup.totalRealizedPnl >= 0 ? 'positive' : undefined}
+                />
+                <ExecutionSummaryCard
+                  label="Weakest setup"
+                  value={paperPerformance.diagnostics.weakestSetup?.label ?? '--'}
+                  detail={paperPerformance.diagnostics.weakestSetup ? `${signedPct(paperPerformance.diagnostics.weakestSetup.totalRealizedPnl)} realized across ${paperPerformance.diagnostics.weakestSetup.closed} closes.` : 'Need closed trades.'}
+                  toneClass={paperPerformance.diagnostics.weakestSetup && paperPerformance.diagnostics.weakestSetup.totalRealizedPnl < 0 ? 'negative' : undefined}
+                />
+                <ExecutionSummaryCard
+                  label="Best edge bucket"
+                  value={paperPerformance.diagnostics.strongestEdgeBucket?.label ?? '--'}
+                  detail={paperPerformance.diagnostics.strongestEdgeBucket ? `${pct(paperPerformance.diagnostics.strongestEdgeBucket.winRate ?? 0)} win rate.` : 'Need closed trades.'}
+                  toneClass={paperPerformance.diagnostics.strongestEdgeBucket && paperPerformance.diagnostics.strongestEdgeBucket.totalRealizedPnl >= 0 ? 'positive' : undefined}
+                />
+                <ExecutionSummaryCard
+                  label="Weakest edge bucket"
+                  value={paperPerformance.diagnostics.weakestEdgeBucket?.label ?? '--'}
+                  detail={paperPerformance.diagnostics.weakestEdgeBucket ? `${signedPct(paperPerformance.diagnostics.weakestEdgeBucket.totalRealizedPnl)} realized.` : 'Need closed trades.'}
+                  toneClass={paperPerformance.diagnostics.weakestEdgeBucket && paperPerformance.diagnostics.weakestEdgeBucket.totalRealizedPnl < 0 ? 'negative' : undefined}
+                />
+              </div>
+
+              <div className="stack-list compact-review-list">
+                {paperPerformance.diagnostics.patterns.map((pattern) => (
+                  <div className="stack-row" key={pattern.title}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{pattern.title}</strong>
+                        <span className={`status-pill tone-${pattern.tone}`}>Pattern</span>
+                      </div>
+                      <p>{pattern.detail}</p>
+                    </div>
+                  </div>
+                ))}
+                {paperPerformance.diagnostics.lessons.length ? paperPerformance.diagnostics.lessons.map((lesson) => (
+                  <div className="stack-row" key={lesson}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>Post-trade lesson</strong>
+                        <span className="status-pill tone-good">Lesson</span>
+                      </div>
+                      <p>{lesson}</p>
+                    </div>
+                  </div>
+                )) : <p className="subtle">Lessons will appear once enough trades have been tracked.</p>}
+              </div>
+            </div>
+          </div>
         </section>
 
         <section className="footer-strip">

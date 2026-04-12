@@ -75,6 +75,15 @@ export type PaperPerformanceBucket = {
 export type PaperPerformanceSummary = {
   totals: PaperPerformanceBucket;
   bySetupType: PaperPerformanceBucket[];
+  byEdgeBucket: PaperPerformanceBucket[];
+  diagnostics: {
+    bestSetup: PaperPerformanceBucket | null;
+    weakestSetup: PaperPerformanceBucket | null;
+    strongestEdgeBucket: PaperPerformanceBucket | null;
+    weakestEdgeBucket: PaperPerformanceBucket | null;
+    patterns: { title: string; detail: string; tone: 'good' | 'warn' | 'bad' }[];
+    lessons: string[];
+  };
   lastClosedAt: string | null;
 };
 
@@ -233,6 +242,110 @@ function buildBucket(key: string, label: string, entries: PaperBlotterEntry[]): 
     totalRealizedPnl,
     totalMarkedPnl,
   };
+}
+
+function edgeBucketKeyFor(entryEdge: number) {
+  const absEdge = Math.abs(entryEdge);
+  if (absEdge >= 0.15) return { key: 'edge-15-plus', label: '15+ pt edge' };
+  if (absEdge >= 0.1) return { key: 'edge-10-14', label: '10 to 14 pt edge' };
+  if (absEdge >= 0.06) return { key: 'edge-6-9', label: '6 to 9 pt edge' };
+  return { key: 'edge-sub-6', label: 'Under 6 pt edge' };
+}
+
+function pickBestBucket(buckets: PaperPerformanceBucket[]) {
+  return buckets
+    .filter((bucket) => bucket.closed > 0)
+    .sort((left, right) => right.totalRealizedPnl - left.totalRealizedPnl || (right.winRate ?? -1) - (left.winRate ?? -1))[0] ?? null;
+}
+
+function pickWorstBucket(buckets: PaperPerformanceBucket[]) {
+  return buckets
+    .filter((bucket) => bucket.closed > 0)
+    .sort((left, right) => left.totalRealizedPnl - right.totalRealizedPnl || (left.winRate ?? 2) - (right.winRate ?? 2))[0] ?? null;
+}
+
+function buildPatterns(entries: PaperBlotterEntry[], totals: PaperPerformanceBucket, bySetupType: PaperPerformanceBucket[], byEdgeBucket: PaperPerformanceBucket[]) {
+  const patterns: { title: string; detail: string; tone: 'good' | 'warn' | 'bad' }[] = [];
+  const closed = entries.filter((entry) => entry.state === 'closed');
+  const winners = closed.filter((entry) => entry.outcome === 'win');
+  const losers = closed.filter((entry) => entry.outcome === 'loss');
+  const avg = (values: number[]) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+
+  if (closed.length) {
+    const winnerEdge = avg(winners.map((entry) => Math.abs(entry.entryEdge)));
+    const loserEdge = avg(losers.map((entry) => Math.abs(entry.entryEdge)));
+    if (winnerEdge !== null && loserEdge !== null) {
+      patterns.push({
+        title: winnerEdge > loserEdge ? 'Bigger entry edge is helping' : 'Big entry edge is not converting cleanly',
+        detail: `Closed winners opened at ${Math.round(winnerEdge * 100)} pts average edge versus ${Math.round(loserEdge * 100)} pts for losers.`,
+        tone: winnerEdge > loserEdge ? 'good' : 'warn',
+      });
+    }
+
+    const winnerConfidence = avg(winners.map((entry) => entry.entryConfidence));
+    const loserConfidence = avg(losers.map((entry) => entry.entryConfidence));
+    if (winnerConfidence !== null && loserConfidence !== null) {
+      patterns.push({
+        title: winnerConfidence >= loserConfidence ? 'Confidence is aligned with outcomes' : 'High-confidence trades are underperforming',
+        detail: `Winners opened at ${Math.round(winnerConfidence * 100)}% confidence versus ${Math.round(loserConfidence * 100)}% for losers.`,
+        tone: winnerConfidence >= loserConfidence ? 'good' : 'bad',
+      });
+    }
+  }
+
+  const bestSetup = pickBestBucket(bySetupType);
+  if (bestSetup) {
+    patterns.push({
+      title: `${bestSetup.label} is the current leader`,
+      detail: `${bestSetup.closed} closed trades, ${Math.round((bestSetup.winRate ?? 0) * 100)}% win rate, ${Math.round(bestSetup.totalRealizedPnl * 100)} pts realized.`,
+      tone: bestSetup.totalRealizedPnl >= 0 ? 'good' : 'warn',
+    });
+  }
+
+  const weakestEdge = pickWorstBucket(byEdgeBucket);
+  if (weakestEdge) {
+    patterns.push({
+      title: `${weakestEdge.label} is dragging review`,
+      detail: `${weakestEdge.closed} closed trades with ${Math.round((weakestEdge.winRate ?? 0) * 100)}% win rate and ${Math.round(weakestEdge.totalRealizedPnl * 100)} pts realized.`,
+      tone: weakestEdge.totalRealizedPnl < 0 ? 'bad' : 'warn',
+    });
+  }
+
+  if (!patterns.length && totals.total > 0) {
+    patterns.push({
+      title: 'More closes needed',
+      detail: 'Trades are being tracked, but there are not enough closed outcomes yet to isolate a real pattern.',
+      tone: 'warn',
+    });
+  }
+
+  return patterns.slice(0, 4);
+}
+
+function buildLessons(totals: PaperPerformanceBucket, bySetupType: PaperPerformanceBucket[], byEdgeBucket: PaperPerformanceBucket[]) {
+  const lessons: string[] = [];
+  const bestSetup = pickBestBucket(bySetupType);
+  const weakestSetup = pickWorstBucket(bySetupType);
+  const strongestEdgeBucket = pickBestBucket(byEdgeBucket);
+  const weakestEdgeBucket = pickWorstBucket(byEdgeBucket);
+
+  if (bestSetup && bestSetup.totalRealizedPnl > 0) {
+    lessons.push(`Lean harder into ${bestSetup.label} when the scanner agrees, it is the strongest realized setup group so far.`);
+  }
+  if (strongestEdgeBucket && strongestEdgeBucket.key !== 'edge-sub-6') {
+    lessons.push(`The cleanest closes are coming from ${strongestEdgeBucket.label.toLowerCase()}, so keep weak-edge trades on a shorter leash.`);
+  }
+  if (weakestSetup && weakestSetup.totalRealizedPnl < 0) {
+    lessons.push(`Review ${weakestSetup.label} entries for false positives, that setup family is the biggest realized drag right now.`);
+  }
+  if (weakestEdgeBucket && weakestEdgeBucket.totalRealizedPnl < 0) {
+    lessons.push(`${weakestEdgeBucket.label} is underperforming, tighten entry standards or downsize that bucket.`);
+  }
+  if (!lessons.length && totals.total > 0) {
+    lessons.push('Keep collecting closes. The review layer is live, but there is not enough dispersion yet to promote a hard lesson.');
+  }
+
+  return lessons.slice(0, 4);
 }
 
 export function getPaperBlotter() {
@@ -432,16 +545,28 @@ export function syncPaperBlotter(markets: WeatherMarket[], paperState: Record<st
 export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEntry>): PaperPerformanceSummary {
   const entries = Object.values(blotter);
   const groups = new Map<string, PaperBlotterEntry[]>();
+  const edgeGroups = new Map<string, { label: string; entries: PaperBlotterEntry[] }>();
 
   for (const entry of entries) {
     const list = groups.get(entry.setupType) ?? [];
     list.push(entry);
     groups.set(entry.setupType, list);
+
+    const edgeBucket = edgeBucketKeyFor(entry.entryEdge);
+    const edgeList = edgeGroups.get(edgeBucket.key)?.entries ?? [];
+    edgeList.push(entry);
+    edgeGroups.set(edgeBucket.key, { label: edgeBucket.label, entries: edgeList });
   }
 
   const bySetupType = Array.from(groups.entries())
     .map(([key, bucketEntries]) => buildBucket(key, key, bucketEntries))
     .sort((left, right) => right.totalRealizedPnl - left.totalRealizedPnl || right.closed - left.closed);
+
+  const byEdgeBucket = Array.from(edgeGroups.entries())
+    .map(([key, value]) => buildBucket(key, value.label, value.entries))
+    .sort((left, right) => right.totalRealizedPnl - left.totalRealizedPnl || right.closed - left.closed);
+
+  const totals = buildBucket('all', 'All setups', entries);
 
   const closedTimes = entries
     .map((entry) => entry.closedAt)
@@ -450,8 +575,17 @@ export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEn
   const lastClosedAt = closedTimes.length ? closedTimes[closedTimes.length - 1] : null;
 
   return {
-    totals: buildBucket('all', 'All setups', entries),
+    totals,
     bySetupType,
+    byEdgeBucket,
+    diagnostics: {
+      bestSetup: pickBestBucket(bySetupType),
+      weakestSetup: pickWorstBucket(bySetupType),
+      strongestEdgeBucket: pickBestBucket(byEdgeBucket),
+      weakestEdgeBucket: pickWorstBucket(byEdgeBucket),
+      patterns: buildPatterns(entries, totals, bySetupType, byEdgeBucket),
+      lessons: buildLessons(totals, bySetupType, byEdgeBucket),
+    },
     lastClosedAt,
   };
 }

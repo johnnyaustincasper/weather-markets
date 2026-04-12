@@ -135,6 +135,7 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .intel-grid,
 .execution-summary-grid,
 .support-grid,
+ .review-diagnostics-grid,
 .footer-strip,
 .telemetry-lanes,
 .tuning-grid,
@@ -145,6 +146,7 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .doctrine-grid,
 .intel-grid,
 .support-grid,
+.review-diagnostics-grid,
 .telemetry-lanes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .footer-strip { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .signal-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -345,6 +347,8 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .compact-form { align-content: start; }
 
 .stack-list { display: grid; gap: 10px; }
+.compact-review-list .stack-row { padding: 12px 14px; }
+.compact-score-grid { margin: 12px 0; }
 .stack-row,
 .history-row,
 .review-row {
