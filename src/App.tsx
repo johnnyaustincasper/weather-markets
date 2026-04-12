@@ -78,6 +78,18 @@ type PaperTradeRecord = {
   note: string;
 };
 
+type WorkflowStageTone = 'good' | 'warn' | 'bad' | 'muted';
+
+type WorkflowStage = {
+  key: string;
+  label: string;
+  status: string;
+  detail: string;
+  tone: WorkflowStageTone;
+  actionLabel?: string;
+  onAction?: () => void;
+};
+
 const loadWatchIds = () => {
   if (typeof window === 'undefined') return [] as string[];
   try {
@@ -433,14 +445,98 @@ function App() {
     setPaperOrders(cancelPaperOrder(selectedMarket.id, orderId));
   };
 
+  const promoteSelectedMarketToActive = () => {
+    if (!selectedMarket) return;
+    setPaperState((current) => ({
+      ...current,
+      [selectedMarket.id]: {
+        state: 'active',
+        updatedAt: new Date().toISOString(),
+        note: 'Promoted to active after a working paper order filled locally.',
+      },
+    }));
+  };
+
+  const closeSelectedMarketForReview = () => {
+    if (!selectedMarket) return;
+    setPaperState((current) => ({
+      ...current,
+      [selectedMarket.id]: {
+        state: 'closed',
+        updatedAt: new Date().toISOString(),
+        note: 'Closed locally and sent to after-action review.',
+      },
+    }));
+    setSelectedReviewMarketId(selectedMarket.id);
+  };
+
   const selectedPlan = selectedMarket ? paperPlans[selectedMarket.id] : null;
   const selectedDelta = selectedMarket ? marketDeltas[selectedMarket.id] : null;
   const selectedBlotter = selectedMarket ? paperBlotter[selectedMarket.id] : null;
   const selectedPaperState = selectedMarket ? paperState[selectedMarket.id] : null;
   const selectedOrders = selectedMarket ? (paperOrders[selectedMarket.id] ?? []) : [];
+  const selectedWorkingOrders = selectedOrders.filter((order) => order.status === 'working');
+  const selectedFilledOrders = selectedOrders.filter((order) => order.status === 'filled');
+  const selectedLatestFilledOrder = selectedFilledOrders[0] ?? null;
+  const selectedExitReady = Boolean(selectedBlotter?.exitSuggestion.shouldClose);
   const selectedOrderDraft = selectedMarket && selectedPlan
     ? (paperOrderDrafts[selectedMarket.id] ?? { quantity: selectedPlan.sizing.suggestedUnits, limitPrice: clampOrderPrice(selectedMarket.impliedProbability), note: '' })
     : null;
+  const workflowStages: WorkflowStage[] = selectedMarket && selectedPlan
+    ? [
+        {
+          key: 'stage',
+          label: 'Stage',
+          status: selectedOrderDraft ? `${selectedOrderDraft.quantity}u @ ${pct(selectedOrderDraft.limitPrice)}` : 'Draft empty',
+          detail: selectedPlan.direction === 'stand-aside'
+            ? 'No executable edge right now, so keep this in monitor mode.'
+            : selectedMarket.dataOrigin === 'curated-watchlist'
+              ? 'Scenario only. Wait for a real contract before staging anything.'
+              : `Bias ${paperDirectionLabel(selectedPlan.direction)} with ${selectedPlan.sizing.notionalLabel}.`,
+          tone: selectedPlan.direction === 'stand-aside' || selectedMarket.dataOrigin === 'curated-watchlist' ? 'muted' : 'good',
+        },
+        {
+          key: 'working',
+          label: 'Working',
+          status: selectedWorkingOrders.length ? `${selectedWorkingOrders.length} live in book` : 'Nothing working',
+          detail: selectedWorkingOrders.length
+            ? `Best working ticket is ${selectedWorkingOrders[0].direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} ${selectedWorkingOrders[0].quantity}u @ ${pct(selectedWorkingOrders[0].limitPrice)}.`
+            : 'Stage a paper order to track the queue and watch for a local fill.',
+          tone: selectedWorkingOrders.length ? 'warn' : 'muted',
+        },
+        {
+          key: 'fill',
+          label: 'Fill handoff',
+          status: selectedLatestFilledOrder ? `Filled ${selectedLatestFilledOrder.quantity}u @ ${pct(selectedLatestFilledOrder.fillPrice ?? selectedLatestFilledOrder.limitPrice)}` : selectedPaperState?.state === 'active' ? 'Position active' : 'No fill yet',
+          detail: selectedPaperState?.state === 'active'
+            ? selectedPaperState.note
+            : selectedLatestFilledOrder
+              ? 'Local fill detected. Promote this into an active paper trade so exits and review stay synced.'
+              : 'Once a staged order fills, move it into the active lane.',
+          tone: selectedPaperState?.state === 'active' ? 'good' : selectedLatestFilledOrder ? 'warn' : 'muted',
+          actionLabel: selectedLatestFilledOrder && selectedPaperState?.state !== 'active' ? 'Mark active' : undefined,
+          onAction: selectedLatestFilledOrder && selectedPaperState?.state !== 'active' ? promoteSelectedMarketToActive : undefined,
+        },
+        {
+          key: 'exit',
+          label: 'Exit watch',
+          status: selectedBlotter?.exitSuggestion.reason === 'take-profit' ? 'Take profit' : selectedBlotter?.exitSuggestion.reason === 'stop-loss' ? 'Exit now' : selectedPaperState?.state === 'active' ? 'Monitor' : 'Not active',
+          detail: selectedBlotter?.exitSuggestion.summary ?? 'No active blotter entry yet.',
+          tone: selectedExitReady ? 'bad' : selectedPaperState?.state === 'active' ? 'good' : 'muted',
+          actionLabel: selectedPaperState?.state === 'active' ? 'Close to review' : undefined,
+          onAction: selectedPaperState?.state === 'active' ? closeSelectedMarketForReview : undefined,
+        },
+        {
+          key: 'review',
+          label: 'Review',
+          status: selectedPaperState?.state === 'closed' ? 'Ready to score' : 'Pending close',
+          detail: selectedPaperState?.state === 'closed'
+            ? 'This trade is now in the after-action queue below with its timeline and lessons.'
+            : 'Closed trades roll into the after-action queue for process review.',
+          tone: selectedPaperState?.state === 'closed' ? 'good' : 'muted',
+        },
+      ]
+    : [];
 
   return (
     <div className="command-app-shell">
@@ -566,6 +662,17 @@ function App() {
                   </div>
 
                   <section className="execution-bay">
+                    <div className="workflow-lane-grid">
+                      {workflowStages.map((stage) => (
+                        <div key={stage.key} className={`score-card workflow-stage-card workflow-tone-${stage.tone}`}>
+                          <span>{stage.label}</span>
+                          <strong>{stage.status}</strong>
+                          <p>{stage.detail}</p>
+                          {stage.actionLabel && stage.onAction && <button className="command-button workflow-action" onClick={stage.onAction}>{stage.actionLabel}</button>}
+                        </div>
+                      ))}
+                    </div>
+
                     <div className="subpanel-header">
                       <div>
                         <span className="detail-label">Execution bay</span>
@@ -613,6 +720,8 @@ function App() {
                           <span className="badge soft">Mark {quotePct(selectedMarket.clobQuote?.midpoint ?? selectedMarket.impliedProbability)}</span>
                           <span className="badge soft">Ask {quotePct(selectedMarket.clobQuote?.bestAsk)}</span>
                           <span className="badge soft">Bid {quotePct(selectedMarket.clobQuote?.bestBid)}</span>
+                          <span className="badge soft">Working {selectedWorkingOrders.length}</span>
+                          <span className="badge soft">Filled {selectedFilledOrders.length}</span>
                           <button className="command-button" onClick={handlePlacePaperOrder}>Stage order</button>
                         </div>
                         <div className="stack-list compact-orders">
@@ -652,6 +761,7 @@ function App() {
                             <li>Current mark: {quotePct(selectedBlotter.currentMark)}</li>
                             <li>PnL: <span className={(selectedBlotter.pnlPoints ?? 0) >= 0 ? 'positive' : 'negative'}>{selectedBlotter.pnlPoints === null ? '--' : signedPct(selectedBlotter.pnlPoints)}</span></li>
                             <li>{selectedBlotter.exitSuggestion.summary}</li>
+                            <li>Journal: {(selectedBlotter.journal ?? []).slice(-1)[0]?.summary ?? 'No journal yet.'}</li>
                           </ul>
                         ) : (
                           <p className="subtle">No blotter entry yet. Queue or activate this trade to start tracking it.</p>

@@ -322,6 +322,22 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .card-footer-row { margin-top: 12px; }
 
 .execution-bay { display: grid; gap: 14px; }
+.workflow-lane-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+.workflow-stage-card {
+  min-height: 190px;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+.workflow-stage-card strong { line-height: 1.2; }
+.workflow-action { margin-top: auto; width: fit-content; }
+.workflow-tone-good { box-shadow: inset 0 0 0 1px rgba(123, 255, 180, 0.12); }
+.workflow-tone-warn { box-shadow: inset 0 0 0 1px rgba(246, 211, 106, 0.12); }
+.workflow-tone-bad { box-shadow: inset 0 0 0 1px rgba(255, 139, 139, 0.12); }
 .order-ticket-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -408,7 +424,8 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
   .execution-summary-grid,
   .signal-strip,
   .tuning-grid,
-  .footer-strip { grid-template-columns: 1fr; }
+  .footer-strip,
+  .workflow-lane-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {
