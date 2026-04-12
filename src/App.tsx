@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
+import { getPaperBlotter, syncPaperBlotter, type PaperBlotterEntry } from './services/paperBlotter';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
 import {
   DEFAULT_WATCHER_REGIME_TUNING,
@@ -342,6 +343,7 @@ function App() {
   const [historyTick, setHistoryTick] = useState(0);
   const [regimeTuning, setRegimeTuning] = useState<WatcherRegimeTuning>(() => loadRegimeTuning());
   const [paperState, setPaperState] = useState<Record<string, PaperTradeRecord>>(() => loadPaperState());
+  const [paperBlotter, setPaperBlotter] = useState<Record<string, PaperBlotterEntry>>(() => getPaperBlotter());
 
   const fetchMarkets = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -501,6 +503,11 @@ function App() {
   const wouldTradeCount = markets.filter((market) => paperPlans[market.id]?.decision === 'would-trade').length;
   const queuedPaperCount = Object.values(paperState).filter((item) => item.state === 'queued').length;
   const activePaperCount = Object.values(paperState).filter((item) => item.state === 'active').length;
+  const exitSuggestedCount = Object.values(paperBlotter).filter((item) => item.state === 'active' && item.exitSuggestion.shouldClose).length;
+
+  useEffect(() => {
+    setPaperBlotter(syncPaperBlotter(markets, paperState, paperPlans));
+  }, [markets, paperPlans, paperState]);
 
   const activeRegimePreset = useMemo(() => getActiveRegimePreset(regimeTuning), [regimeTuning]);
   const scanState = useMemo(() => formatScanState(meta, loading, refreshing, error), [meta, loading, refreshing, error]);
@@ -598,7 +605,7 @@ function App() {
           <div className="panel summary-card">
             <span className="summary-label">Paper engine</span>
             <strong>{wouldTradeCount} markets would trade now</strong>
-            <span className="subtle">{queuedPaperCount} queued and {activePaperCount} active in local paper state, still read-only.</span>
+            <span className="subtle">{queuedPaperCount} queued, {activePaperCount} active, {exitSuggestedCount} exit suggestions live. Still read-only.</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Execution regimes</span>
@@ -715,6 +722,7 @@ function App() {
                     const isWatched = watchSet.has(market.id);
                     const paperPlan = paperPlans[market.id];
                     const paperRecord = paperState[market.id];
+                    const blotterRecord = paperBlotter[market.id];
                     return (
                       <tr
                         key={market.id}
@@ -728,6 +736,7 @@ function App() {
                             <div className="inline-flags">
                               <span className={`status-chip ${paperDecisionToneClass(paperPlan.decision)}`}>{paperDecisionLabel(paperPlan.decision)}</span>
                               {paperRecord && <span className="status-chip tone-muted">Paper {paperRecord.state.toUpperCase()}</span>}
+                              {blotterRecord?.exitSuggestion.shouldClose && <span className="status-chip tone-warn">{blotterRecord.exitSuggestion.reason === 'take-profit' ? 'Take profit hit' : 'Exit suggested'}</span>}
                               {delta.alerts.slice(0, 2).map((alert) => (
                                 <span key={alert.id} className={`status-chip tone-${alert.tone}`}>{alert.summary}</span>
                               ))}
@@ -786,6 +795,7 @@ function App() {
                 const isWatched = watchSet.has(market.id);
                 const paperPlan = paperPlans[market.id];
                 const paperRecord = paperState[market.id];
+                const blotterRecord = paperBlotter[market.id];
                 return (
                   <button
                     key={market.id}
@@ -804,7 +814,7 @@ function App() {
                       <span>{freshnessLabel(market.freshnessMinutes)}</span>
                     </div>
                     <div className="market-card-actions">
-                      <span className="subtle">{paperDecisionLabel(paperPlan.decision)}{paperRecord ? ` · ${paperRecord.state}` : ''}</span>
+                      <span className="subtle">{paperDecisionLabel(paperPlan.decision)}{paperRecord ? ` · ${paperRecord.state}` : ''}{blotterRecord?.exitSuggestion.shouldClose ? ' · exit suggested' : ''}</span>
                       <span className={`watch-inline ${isWatched ? 'active' : ''}`}>{isWatched ? 'Watching' : 'Tap detail to watch'}</span>
                     </div>
                   </button>
@@ -839,6 +849,7 @@ function App() {
                   {(() => {
                     const paperPlan = paperPlans[selectedMarket.id];
                     const paperRecord = paperState[selectedMarket.id];
+                    const blotterRecord = paperBlotter[selectedMarket.id];
                     return (
                       <>
                   <div className="detail-badges">
@@ -848,6 +859,7 @@ function App() {
                     <span className={`status-chip ${convictionToneClass(paperPlan.conviction)}`}>{paperPlan.conviction.toUpperCase()} conviction</span>
                     <span className="status-chip tone-muted">Direction {paperDirectionLabel(paperPlan.direction)}</span>
                     {paperRecord && <span className="status-chip tone-muted">Paper {paperRecord.state.toUpperCase()}</span>}
+                    {blotterRecord?.exitSuggestion.shouldClose && <span className={`status-chip ${blotterRecord.exitSuggestion.reason === 'take-profit' ? 'tone-good' : 'tone-warn'}`}>{blotterRecord.exitSuggestion.reason === 'take-profit' ? 'Take profit suggested' : 'Stop/close suggested'}</span>}
                     {marketDeltas[selectedMarket.id]?.alerts.slice(0, 3).map((alert) => (
                       <span key={alert.id} className={`status-chip tone-${alert.tone}`}>{alert.summary}</span>
                     ))}
@@ -919,6 +931,40 @@ function App() {
                       <ExecutionSummaryCard label="Initial size" value={`${paperPlan.sizing.suggestedUnits} units`} detail={`Max ${paperPlan.sizing.maxUnits} units, scale in ${paperPlan.sizing.scaleInUnits} at a time.`} />
                       <ExecutionSummaryCard label="Blockers" value={String(paperPlan.blockers.length)} detail={paperPlan.blockers[0] ?? 'No active blocker, this setup clears the first paper-trade bar.'} toneClass={paperPlan.blockers.length ? 'negative' : 'positive'} />
                     </div>
+                    {blotterRecord && (
+                      <section className="blotter-panel">
+                        <div className="panel-header blotter-header">
+                          <div>
+                            <span className="detail-label">Paper blotter</span>
+                            <p className="subtle">Entry, marks, timestamps, and journal stay local in this browser only.</p>
+                          </div>
+                          <span className={`status-chip ${blotterRecord.exitSuggestion.shouldClose ? (blotterRecord.exitSuggestion.reason === 'take-profit' ? 'tone-good' : 'tone-warn') : 'tone-muted'}`}>{blotterRecord.exitSuggestion.summary}</span>
+                        </div>
+                        <div className="execution-summary-grid">
+                          <ExecutionSummaryCard label="Entry mark" value={quotePct(blotterRecord.entryPrice)} detail={`Queued ${formatClock(blotterRecord.queuedAt ?? undefined)} · active ${formatClock(blotterRecord.activatedAt ?? undefined)}`} />
+                          <ExecutionSummaryCard label="Current mark" value={quotePct(blotterRecord.currentMark)} detail={`Last marked ${formatClock(blotterRecord.lastMarkedAt ?? undefined)}`} />
+                          <ExecutionSummaryCard label="Paper PnL" value={signedQuotePct(blotterRecord.pnlPoints)} detail={blotterRecord.pnlPercentOnRisk === null ? 'Need a valid mark to score PnL.' : `${Math.round(blotterRecord.pnlPercentOnRisk)} bps on entry price`} toneClass={(blotterRecord.pnlPoints ?? 0) >= 0 ? 'positive' : 'negative'} />
+                          <ExecutionSummaryCard label="Risk rails" value={`${quotePct(blotterRecord.stopPrice)} stop`} detail={`Take profit ${quotePct(blotterRecord.takeProfitPrice)}`} toneClass={blotterRecord.exitSuggestion.shouldClose ? 'negative' : undefined} />
+                        </div>
+                        <div className="checklist-grid blotter-checklist-grid">
+                          <div className="checklist-card">
+                            <span className="detail-label">Thesis snapshot</span>
+                            <p className="blotter-copy">{blotterRecord.thesisSnapshot}</p>
+                          </div>
+                          <div className="checklist-card">
+                            <span className="detail-label">Journal</span>
+                            <div className="blotter-journal-list">
+                              {blotterRecord.journal.slice().reverse().map((item) => (
+                                <div key={`${item.at}-${item.summary}`} className="blotter-journal-row">
+                                  <strong>{item.summary}</strong>
+                                  <small>{new Date(item.at).toLocaleString()}</small>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      </section>
+                    )}
                   </section>
                   {selectedTrend && (
                     <div>

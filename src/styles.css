@@ -533,6 +533,41 @@ tbody tr:hover,
   margin-top: 18px;
 }
 
+.blotter-panel {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(125, 211, 252, 0.05);
+  border: 1px solid rgba(125, 211, 252, 0.12);
+}
+
+.blotter-header {
+  margin-bottom: 0;
+}
+
+.blotter-copy {
+  margin: 10px 0 0;
+}
+
+.blotter-journal-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.blotter-journal-row {
+  display: grid;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.blotter-journal-row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
 .paper-engine-header {
   display: flex;
   align-items: start;
