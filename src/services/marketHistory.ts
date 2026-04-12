@@ -44,6 +44,15 @@ export type MarketTrendSummary = {
 
 export type WatcherExecutionRegimeKind = 'flip-risk' | 'execution-degrading' | 'tradability-improving';
 
+export type WatcherRegimeTuning = {
+  windowSize: number;
+  flipRiskMinFlips: number;
+  qualityDropThreshold: number;
+  qualityRiseThreshold: number;
+  freshnessPenaltyMin: number;
+  requireMonotonicQuality: boolean;
+};
+
 export type WatcherExecutionRegime = {
   marketId: string;
   title: string;
@@ -56,6 +65,7 @@ export type WatcherExecutionRegime = {
   latestQuoteStatus: QuoteStatus | null;
   previousQuoteStatus: QuoteStatus | null;
   latestCapturedAt: string | null;
+  tuningLabel: string;
 };
 
 export type WatcherExecutionRegimeOverview = {
@@ -66,6 +76,8 @@ export type WatcherExecutionRegimeOverview = {
   improvingCount: number;
   latestCapturedAt: string | null;
   regimes: WatcherExecutionRegime[];
+  tuning: WatcherRegimeTuning;
+  tuningLabel: string;
 };
 
 export type WatcherOverview = {
@@ -83,6 +95,15 @@ const MAX_SNAPSHOTS_PER_MARKET = 36;
 const MAX_MARKET_RECORDS = 80;
 const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 14;
 const DEFAULT_REGIME_WINDOW = 6;
+
+export const DEFAULT_WATCHER_REGIME_TUNING: WatcherRegimeTuning = {
+  windowSize: DEFAULT_REGIME_WINDOW,
+  flipRiskMinFlips: 2,
+  qualityDropThreshold: 0.18,
+  qualityRiseThreshold: 0.18,
+  freshnessPenaltyMin: 0,
+  requireMonotonicQuality: true,
+};
 
 function hasLocalStorage() {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -188,8 +209,12 @@ function formatStatus(status: QuoteStatus | null) {
   return status ? status.toUpperCase() : '--';
 }
 
-function summarizeExecutionRegime(record: MarketHistoryRecord, windowSize: number): WatcherExecutionRegime[] {
-  const window = record.snapshots.slice(-windowSize);
+function formatTuningLabel(tuning: WatcherRegimeTuning) {
+  return `${tuning.windowSize} snap · ${tuning.flipRiskMinFlips}+ flips · ${Math.round(tuning.qualityDropThreshold * 100)}pt drop / ${Math.round(tuning.qualityRiseThreshold * 100)}pt rise`;
+}
+
+function summarizeExecutionRegime(record: MarketHistoryRecord, tuning: WatcherRegimeTuning): WatcherExecutionRegime[] {
+  const window = record.snapshots.slice(-tuning.windowSize);
   if (window.length < 3) return [];
 
   const latest = window[window.length - 1] ?? null;
@@ -204,52 +229,58 @@ function summarizeExecutionRegime(record: MarketHistoryRecord, windowSize: numbe
   const freshnessDelta = (latest?.freshnessMinutes ?? 0) - (window[0]?.freshnessMinutes ?? 0);
   const spreadDelta = spreadValues.length >= 2 ? spreadValues[spreadValues.length - 1] - spreadValues[0] : 0;
   const regimes: WatcherExecutionRegime[] = [];
+  const tuningLabel = formatTuningLabel(tuning);
+  const qualityFalling = tuning.requireMonotonicQuality ? isMonotonic(quoteQuality, 'down') : qualityDelta < 0;
+  const qualityRising = tuning.requireMonotonicQuality ? isMonotonic(quoteQuality, 'up') : qualityDelta > 0;
 
-  if (statusFlips >= 2) {
+  if (statusFlips >= tuning.flipRiskMinFlips) {
     regimes.push({
       marketId: record.marketId,
       title: record.title,
       location: record.location,
       kind: 'flip-risk',
       summary: `${record.title} keeps flipping quote posture`,
-      detail: `${statusFlips} quote-status flips over the last ${window.length} local snapshots, now ${formatStatus(latestStatus)} after ${formatStatus(previousStatus)}.`,
+      detail: `${statusFlips} quote-status flips over the last ${window.length} local snapshots, now ${formatStatus(latestStatus)} after ${formatStatus(previousStatus)}. Triggered under ${tuningLabel}.`,
       signalCount: statusFlips,
       score: statusFlips + Math.abs(statusRankDelta) + Math.abs(qualityDelta),
       latestQuoteStatus: latestStatus,
       previousQuoteStatus: previousStatus,
       latestCapturedAt: latest?.capturedAt ?? null,
+      tuningLabel,
     });
   }
 
-  if (qualityDelta < -0.18 && isMonotonic(quoteQuality, 'down') && freshnessDelta >= 0) {
+  if (qualityDelta <= -tuning.qualityDropThreshold && qualityFalling && freshnessDelta >= tuning.freshnessPenaltyMin) {
     regimes.push({
       marketId: record.marketId,
       title: record.title,
       location: record.location,
       kind: 'execution-degrading',
       summary: `${record.title} is steadily losing execution quality`,
-      detail: `Quote quality slid ${Math.round(Math.abs(qualityDelta) * 100)} pts over ${window.length} snapshots, freshness worsened by ${Math.round(freshnessDelta)}m${spreadValues.length >= 2 ? `, spread moved ${spreadDelta >= 0 ? '+' : ''}${Math.round(spreadDelta * 100)} pts` : ''}.`,
+      detail: `Quote quality slid ${Math.round(Math.abs(qualityDelta) * 100)} pts over ${window.length} snapshots, freshness worsened by ${Math.round(freshnessDelta)}m${spreadValues.length >= 2 ? `, spread moved ${spreadDelta >= 0 ? '+' : ''}${Math.round(spreadDelta * 100)} pts` : ''}. Triggered under ${tuningLabel}.`,
       signalCount: window.length,
       score: Math.abs(qualityDelta) * 10 + Math.max(freshnessDelta, 0) / 30 + Math.max(spreadDelta, 0) * 5,
       latestQuoteStatus: latestStatus,
       previousQuoteStatus: previousStatus,
       latestCapturedAt: latest?.capturedAt ?? null,
+      tuningLabel,
     });
   }
 
-  if (qualityDelta > 0.18 && isMonotonic(quoteQuality, 'up') && statusRankDelta > 0) {
+  if (qualityDelta >= tuning.qualityRiseThreshold && qualityRising && statusRankDelta > 0) {
     regimes.push({
       marketId: record.marketId,
       title: record.title,
       location: record.location,
       kind: 'tradability-improving',
       summary: `${record.title} is becoming easier to trade`,
-      detail: `Quote quality improved ${Math.round(qualityDelta * 100)} pts over ${window.length} snapshots and quote status climbed from ${formatStatus(window[0]?.quoteStatus ?? null)} to ${formatStatus(latestStatus)}${spreadValues.length >= 2 ? ` with spread ${spreadDelta < 0 ? 'tightening' : 'holding roughly flat'}` : ''}.`,
+      detail: `Quote quality improved ${Math.round(qualityDelta * 100)} pts over ${window.length} snapshots and quote status climbed from ${formatStatus(window[0]?.quoteStatus ?? null)} to ${formatStatus(latestStatus)}${spreadValues.length >= 2 ? ` with spread ${spreadDelta < 0 ? 'tightening' : 'holding roughly flat'}` : ''}. Triggered under ${tuningLabel}.`,
       signalCount: window.length,
       score: qualityDelta * 10 + statusRankDelta + Math.max(-spreadDelta, 0) * 5,
       latestQuoteStatus: latestStatus,
       previousQuoteStatus: previousStatus,
       latestCapturedAt: latest?.capturedAt ?? null,
+      tuningLabel,
     });
   }
 
@@ -313,10 +344,10 @@ export function summarizeMarketTrend(marketId: string): MarketTrendSummary {
   };
 }
 
-export function getWatcherExecutionRegimes(windowSize = DEFAULT_REGIME_WINDOW): WatcherExecutionRegimeOverview {
+export function getWatcherExecutionRegimes(tuning: WatcherRegimeTuning = DEFAULT_WATCHER_REGIME_TUNING): WatcherExecutionRegimeOverview {
   const records = Object.values(readStore());
   const regimes = records
-    .flatMap((record) => summarizeExecutionRegime(record, windowSize))
+    .flatMap((record) => summarizeExecutionRegime(record, tuning))
     .sort((left, right) => right.score - left.score || (right.latestCapturedAt ?? '').localeCompare(left.latestCapturedAt ?? ''));
 
   const latestCapturedAt = regimes[0]?.latestCapturedAt ?? null;
@@ -325,13 +356,15 @@ export function getWatcherExecutionRegimes(windowSize = DEFAULT_REGIME_WINDOW): 
   const improvingCount = regimes.filter((regime) => regime.kind === 'tradability-improving').length;
 
   return {
-    windowSize,
+    windowSize: tuning.windowSize,
     totalFlagged: regimes.length,
     flipRiskCount,
     degradingCount,
     improvingCount,
     latestCapturedAt,
     regimes,
+    tuning,
+    tuningLabel: formatTuningLabel(tuning),
   };
 }
 

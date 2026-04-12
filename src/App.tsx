@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
 import {
+  DEFAULT_WATCHER_REGIME_TUNING,
   captureMarketHistory,
   getMarketHistory,
   getWatcherExecutionRegimes,
@@ -9,14 +10,15 @@ import {
   type MarketHistorySnapshot,
   type MetricTrend,
   type WatcherExecutionRegime,
+  type WatcherRegimeTuning,
 } from './services/marketHistory';
 import type { MarketFeedMeta, QuoteStatus, WeatherMarket } from './types';
 
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
+const REGIME_TUNING_STORAGE_KEY = 'weather-markets-regime-tuning';
 const REFRESH_MS = 90_000;
 const QUOTE_REFRESH_MS = 20_000;
 const MAX_ALERTS = 18;
-const REGIME_WINDOW = 6;
 
 const pct = (value: number) => `${Math.round(value * 100)}%`;
 const signedPct = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`;
@@ -73,6 +75,30 @@ const loadWatchIds = () => {
     return [] as string[];
   }
 };
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const loadRegimeTuning = (): WatcherRegimeTuning => {
+  if (typeof window === 'undefined') return DEFAULT_WATCHER_REGIME_TUNING;
+
+  try {
+    const raw = window.localStorage.getItem(REGIME_TUNING_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Partial<WatcherRegimeTuning> : {};
+
+    return {
+      windowSize: clamp(Math.round(parsed.windowSize ?? DEFAULT_WATCHER_REGIME_TUNING.windowSize), 3, 12),
+      flipRiskMinFlips: clamp(Math.round(parsed.flipRiskMinFlips ?? DEFAULT_WATCHER_REGIME_TUNING.flipRiskMinFlips), 1, 6),
+      qualityDropThreshold: clamp(parsed.qualityDropThreshold ?? DEFAULT_WATCHER_REGIME_TUNING.qualityDropThreshold, 0.05, 0.5),
+      qualityRiseThreshold: clamp(parsed.qualityRiseThreshold ?? DEFAULT_WATCHER_REGIME_TUNING.qualityRiseThreshold, 0.05, 0.5),
+      freshnessPenaltyMin: clamp(Math.round(parsed.freshnessPenaltyMin ?? DEFAULT_WATCHER_REGIME_TUNING.freshnessPenaltyMin), 0, 180),
+      requireMonotonicQuality: parsed.requireMonotonicQuality ?? DEFAULT_WATCHER_REGIME_TUNING.requireMonotonicQuality,
+    };
+  } catch {
+    return DEFAULT_WATCHER_REGIME_TUNING;
+  }
+};
+
+const tuningThresholdLabel = (value: number) => `${Math.round(value * 100)} pts`;
 
 const toneForAlert = (kind: AlertKind, magnitude: number): AlertTone => {
   if (kind === 'freshness' || kind === 'status') return magnitude >= 1 ? 'warn' : 'bad';
@@ -231,6 +257,7 @@ function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [lastScanAt, setLastScanAt] = useState<string>('');
   const [historyTick, setHistoryTick] = useState(0);
+  const [regimeTuning, setRegimeTuning] = useState<WatcherRegimeTuning>(() => loadRegimeTuning());
 
   const fetchMarkets = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -310,6 +337,11 @@ function App() {
   }, [watchIds]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(REGIME_TUNING_STORAGE_KEY, JSON.stringify(regimeTuning));
+  }, [regimeTuning]);
+
+  useEffect(() => {
     const interval = window.setInterval(() => {
       void fetchMarkets(true);
     }, REFRESH_MS);
@@ -337,7 +369,7 @@ function App() {
   }, [markets, previousMarkets, watchSet]);
 
   const watcherOverview = useMemo(() => getWatcherOverview(), [historyTick]);
-  const watcherExecution = useMemo(() => getWatcherExecutionRegimes(REGIME_WINDOW), [historyTick]);
+  const watcherExecution = useMemo(() => getWatcherExecutionRegimes(regimeTuning), [historyTick, regimeTuning]);
 
   const allAlerts = useMemo(() => {
     const regimeAlerts: MarketAlert[] = watcherExecution.regimes.slice(0, 6).map((regime) => ({
@@ -353,10 +385,10 @@ function App() {
           : 'Tradability improving',
       detail: regime.detail,
       action: regime.kind === 'execution-degrading'
-        ? 'Keep this read-only until execution stabilizes.'
+        ? `Keep this read-only until execution stabilizes. Active tuning: ${regime.tuningLabel}.`
         : regime.kind === 'flip-risk'
-          ? 'Watch another refresh before leaning on this tape.'
-          : 'Execution is improving, re-check whether the edge is still live.',
+          ? `Watch another refresh before leaning on this tape. Active tuning: ${regime.tuningLabel}.`
+          : `Execution is improving, re-check whether the edge is still live. Active tuning: ${regime.tuningLabel}.`,
       createdAt: regime.latestCapturedAt ?? new Date().toISOString(),
     }));
 
@@ -376,6 +408,14 @@ function App() {
   const watchCount = watchIds.filter((id) => markets.some((market) => market.id === id)).length;
   const deterioratingCount = markets.filter((market) => (marketDeltas[market.id]?.freshnessDelta ?? 0) >= 20).length;
   const actionCount = allAlerts.filter((alert) => alert.tone !== 'bad').length;
+
+  const updateRegimeTuning = <K extends keyof WatcherRegimeTuning>(key: K, value: WatcherRegimeTuning[K]) => {
+    setRegimeTuning((current) => ({ ...current, [key]: value }));
+  };
+
+  const resetRegimeTuning = () => {
+    setRegimeTuning(DEFAULT_WATCHER_REGIME_TUNING);
+  };
 
   const toggleWatch = (marketId: string) => {
     setWatchIds((current) => current.includes(marketId) ? current.filter((id) => id !== marketId) : [...current, marketId]);
@@ -430,7 +470,49 @@ function App() {
           <div className="panel summary-card">
             <span className="summary-label">Execution regimes</span>
             <strong>{watcherExecution.totalFlagged} markets flagged over {watcherExecution.windowSize} snapshots</strong>
-            <span className="subtle">{watcherExecution.flipRiskCount} flipping, {watcherExecution.degradingCount} degrading, {watcherExecution.improvingCount} improving.</span>
+            <span className="subtle">{watcherExecution.flipRiskCount} flipping, {watcherExecution.degradingCount} degrading, {watcherExecution.improvingCount} improving. Active tuning: {watcherExecution.tuningLabel}.</span>
+          </div>
+          <div className="panel summary-card regime-tuning-card">
+            <div className="tuning-header-row">
+              <div>
+                <span className="summary-label">Regime tuning</span>
+                <strong>Local-only watcher sensitivity</strong>
+              </div>
+              <button className="watch-toggle" onClick={resetRegimeTuning}>Reset</button>
+            </div>
+            <span className="subtle">Changes only affect this browser's watcher summary, history, and alerts.</span>
+            <div className="tuning-grid">
+              <label>
+                <span>Window</span>
+                <input type="range" min="3" max="12" step="1" value={regimeTuning.windowSize} onChange={(event) => updateRegimeTuning('windowSize', Number(event.target.value))} />
+                <strong>{regimeTuning.windowSize} snapshots</strong>
+              </label>
+              <label>
+                <span>Flip threshold</span>
+                <input type="range" min="1" max="6" step="1" value={regimeTuning.flipRiskMinFlips} onChange={(event) => updateRegimeTuning('flipRiskMinFlips', Number(event.target.value))} />
+                <strong>{regimeTuning.flipRiskMinFlips}+ flips</strong>
+              </label>
+              <label>
+                <span>Degrade threshold</span>
+                <input type="range" min="0.05" max="0.5" step="0.01" value={regimeTuning.qualityDropThreshold} onChange={(event) => updateRegimeTuning('qualityDropThreshold', Number(event.target.value))} />
+                <strong>{tuningThresholdLabel(regimeTuning.qualityDropThreshold)}</strong>
+              </label>
+              <label>
+                <span>Improve threshold</span>
+                <input type="range" min="0.05" max="0.5" step="0.01" value={regimeTuning.qualityRiseThreshold} onChange={(event) => updateRegimeTuning('qualityRiseThreshold', Number(event.target.value))} />
+                <strong>{tuningThresholdLabel(regimeTuning.qualityRiseThreshold)}</strong>
+              </label>
+              <label>
+                <span>Freshness gate</span>
+                <input type="range" min="0" max="180" step="10" value={regimeTuning.freshnessPenaltyMin} onChange={(event) => updateRegimeTuning('freshnessPenaltyMin', Number(event.target.value))} />
+                <strong>{regimeTuning.freshnessPenaltyMin}m+</strong>
+              </label>
+              <label className="tuning-toggle">
+                <span>Require steady path</span>
+                <input type="checkbox" checked={regimeTuning.requireMonotonicQuality} onChange={(event) => updateRegimeTuning('requireMonotonicQuality', event.target.checked)} />
+                <strong>{regimeTuning.requireMonotonicQuality ? 'Monotonic quality required' : 'Allow noisier transitions'}</strong>
+              </label>
+            </div>
           </div>
         </section>
 
@@ -627,7 +709,7 @@ function App() {
                         <ExecutionSummaryCard
                           label="Watcher regime"
                           value={regimeBadgeLabel(watcherExecution.regimes.find((item) => item.marketId === selectedMarket.id))}
-                          detail={watcherExecution.regimes.find((item) => item.marketId === selectedMarket.id)?.detail ?? `No watcher-level regime across the last ${watcherExecution.windowSize} snapshots.`}
+                          detail={watcherExecution.regimes.find((item) => item.marketId === selectedMarket.id)?.detail ?? `No watcher-level regime across the last ${watcherExecution.windowSize} snapshots under ${watcherExecution.tuningLabel}.`}
                           toneClass={regimeToneClass(watcherExecution.regimes.find((item) => item.marketId === selectedMarket.id)?.kind)}
                         />
                         <ExecutionSummaryCard
@@ -699,7 +781,10 @@ function App() {
                   <p className="eyebrow">Watcher history</p>
                   <h2>Recent local snapshots</h2>
                 </div>
-                <span className="badge soft">{selectedTrend?.snapshotCount ?? 0} captures</span>
+                <div className="table-actions">
+                  <span className="badge soft">{selectedTrend?.snapshotCount ?? 0} captures</span>
+                  <span className="badge soft">{watcherExecution.tuningLabel}</span>
+                </div>
               </div>
               {selectedHistory.length ? (
                 <div className="history-list">
@@ -721,7 +806,10 @@ function App() {
                   <p className="eyebrow">Scanner alerts</p>
                   <h2>What changed on this board</h2>
                 </div>
-                <span className="badge soft">Local only, no notifications sent</span>
+                <div className="table-actions">
+                  <span className="badge soft">Local only, no notifications sent</span>
+                  <span className="badge soft">{watcherExecution.tuningLabel}</span>
+                </div>
               </div>
               <div className="source-list">
                 {allAlerts.length ? allAlerts.map((alert) => (
@@ -947,6 +1035,7 @@ function WatcherRegimeRow({ regime }: { regime: WatcherExecutionRegime }) {
         <div className="history-meta-row">
           <span className={`status-chip ${regimeToneClass(regime.kind)}`}>{regimeBadgeLabel(regime)}</span>
           <span className="status-chip tone-muted">{regime.location}</span>
+          <span className="status-chip tone-muted">{regime.tuningLabel}</span>
           <span className={`status-chip ${regime.latestQuoteStatus ? quoteToneClass(regime.latestQuoteStatus) : 'tone-muted'}`}>Now {regime.latestQuoteStatus ? regime.latestQuoteStatus.toUpperCase() : '--'}</span>
         </div>
       </div>

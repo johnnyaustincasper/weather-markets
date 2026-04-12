@@ -189,7 +189,7 @@ h2 {
 }
 
 .summary-grid-wide {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .summary-card {
@@ -200,6 +200,46 @@ h2 {
   display: block;
   margin: 10px 0 6px;
   font-size: 1.02rem;
+}
+
+.regime-tuning-card {
+  display: grid;
+  gap: 14px;
+}
+
+.tuning-header-row {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tuning-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.tuning-grid label {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.tuning-grid input[type="range"] {
+  width: 100%;
+}
+
+.tuning-grid input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+.tuning-toggle {
+  align-content: start;
 }
 
 .content-grid {
@@ -688,7 +728,8 @@ tbody tr:hover,
   .execution-summary-grid,
   .sparkline-grid,
   .operator-grid,
-  .checklist-grid {
+  .checklist-grid,
+  .tuning-grid {
     grid-template-columns: 1fr;
   }
 
