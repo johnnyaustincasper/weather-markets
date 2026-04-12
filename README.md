@@ -42,12 +42,13 @@ This repo is now scaffolded for a standalone Firebase path on project `weather-m
 - `.firebaserc` points the default Firebase project to `weather-markets-bot`
 - Firebase Hosting is already mapped to the `weather-markets-bot` site
 - Firebase Web app `weather-markets-web` exists and its public SDK values are prefilled in `.env.example`
-- `firebase.json` keeps Hosting, Firestore rules, and Firestore index config in-repo
+- `firebase.json` keeps Hosting, Firestore rules, Firestore indexes, and the Functions codebase in-repo
 - `firestore.indexes.json` is scaffolded so future composite indexes can be tracked in git
 - `.env.example` documents the Vite Firebase web config expected by the app, including `VITE_PAPER_LEDGER_ID`
 - `src/lib/firebase.ts` safely initializes Firebase only when env vars are present
-- `src/services/paperPersistence.ts` adds a Firestore-backed paper ledger document
-- `src/App.tsx` now hydrates from Firestore when configured and otherwise falls back cleanly to browser-local storage
+- `src/services/paperPersistence.ts` adds a Firestore-backed paper ledger document with owner metadata and owner-scoped document ids
+- `src/App.tsx` now offers Firebase Auth sign-in, hydrates only the signed-in owner's ledger from Firestore, and otherwise falls back cleanly to browser-local storage
+- `functions/src/index.ts` adds a backend-runner-ready scheduled paper bot tick path plus an HTTP trigger for manual runs
 - the UI shows whether paper persistence is running local-only or against Firestore
 
 ### Local setup
@@ -59,8 +60,8 @@ npm run dev
 ```
 
 ### Current Firestore shape
-The first durable backend layer writes one document per paper ledger in:
-- `paperTradeLedgers/{ledgerId}`
+The first durable backend layer writes one document per owner-scoped paper ledger in:
+- `paperTradeLedgers/{ownerUid}__{ledgerId}`
 
 That document currently stores:
 - watchlist ids
@@ -78,10 +79,40 @@ npm run deploy
 npm run deploy:firebase
 ```
 
+### Backend runner scaffold
+The next scheduler step is now in-repo under `functions/`.
+
+What it does:
+- runs on a Firebase scheduled function, default `every 5 minutes`
+- can also be triggered manually through an HTTP function or a one-shot local script
+- reads `paperTradeLedgers/{ledgerId}` from Firestore
+- fetches the current weather market scan using the same market provider used by the app
+- runs the existing `runPaperBotTick(...)` paper-only loop
+- writes the updated ledger back to Firestore with backend run metadata
+
+Useful commands:
+```bash
+npm install
+npm --prefix functions install
+npm run build
+npm run build:functions
+npm --prefix functions run tick:once
+npm run deploy:backend
+```
+
+Optional backend env vars:
+- `WEATHER_MARKETS_PAPER_LEDGER_ID`, default `default`
+- `WEATHER_MARKETS_RUNNER_ID`, default `firebase-scheduler`
+- `WEATHER_MARKETS_CRON`, default `every 5 minutes`
+
+Deployed Firebase functions:
+- `runScheduledPaperBot`, the cron entrypoint
+- `triggerPaperBotNow`, a manual HTTP trigger for ad hoc backend runs
+
 ### Manual console steps still required
 1. Open Firebase Console for project `weather-markets-bot`
 2. Enable Firebase Authentication if you want direct browser writes to Firestore
-3. Update the app to sign users in and persist `ownerUid` on each `paperTradeLedgers/{ledgerId}` document
+3. Enable Google as a Firebase Auth sign-in provider so the new browser sign-in button can mint a trusted owner identity
 4. Keep or tighten the auth-aware `firestore.rules` in this repo, then deploy them with `npm run deploy:firestore`
 5. If you deploy through Vercel instead of Firebase Hosting, copy the same `VITE_FIREBASE_*` env vars into the Vercel project settings
 
@@ -100,5 +131,5 @@ Replace the current heuristic contract mapping with a real market parser that:
 1. recognizes listed weather contracts directly from exchange metadata
 2. maps each contract to a structured resolution schema
 3. uses event-specific weather features instead of generic threshold heuristics
-4. wires `runPaperBotTick` into a real scheduled backend entrypoint that reads and writes the Firestore ledger
+4. adds auth or service-to-service controls around the manual HTTP trigger and any future operator actions
 5. backtests edge ranking against historical forecast drift and settlement outcomes

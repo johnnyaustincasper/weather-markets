@@ -14,6 +14,9 @@ export type PaperTradeRecord = {
 
 export type PersistentPaperState = {
   version: 1;
+  ownerUid: string | null;
+  ownerEmail: string | null;
+  ownerDisplayName: string | null;
   watchIds: string[];
   paperState: Record<string, PaperTradeRecord>;
   paperExecutionProfile: PaperExecutionProfile;
@@ -34,6 +37,12 @@ export const LOCAL_STORAGE_KEYS = {
 
 const COLLECTION_NAME = 'paperTradeLedgers';
 export const DEFAULT_PAPER_LEDGER_ID = (import.meta.env.VITE_PAPER_LEDGER_ID as string | undefined)?.trim() || 'default';
+
+export type LedgerOwnerIdentity = {
+  uid: string;
+  email?: string | null;
+  displayName?: string | null;
+};
 
 function hasLocalStorage() {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -61,6 +70,9 @@ function sanitizeState(input: Partial<PersistentPaperState>): PersistentPaperSta
 
   return {
     version: 1,
+    ownerUid: typeof input.ownerUid === 'string' ? input.ownerUid : null,
+    ownerEmail: typeof input.ownerEmail === 'string' ? input.ownerEmail : null,
+    ownerDisplayName: typeof input.ownerDisplayName === 'string' ? input.ownerDisplayName : null,
     watchIds: Array.isArray(input.watchIds) ? input.watchIds.filter((value): value is string => typeof value === 'string') : [],
     paperState: input.paperState && typeof input.paperState === 'object' ? input.paperState : {},
     paperExecutionProfile: {
@@ -84,6 +96,9 @@ function sanitizeState(input: Partial<PersistentPaperState>): PersistentPaperSta
 export function readPersistentPaperState(): PersistentPaperState {
   return sanitizeState({
     version: 1,
+    ownerUid: null,
+    ownerEmail: null,
+    ownerDisplayName: null,
     watchIds: readJson(LOCAL_STORAGE_KEYS.watchIds, []),
     paperState: readJson(LOCAL_STORAGE_KEYS.paperState, {}),
     paperExecutionProfile: readJson(LOCAL_STORAGE_KEYS.paperExecutionProfile, { global: DEFAULT_PAPER_EXECUTION_SETTINGS, perMarket: {} }),
@@ -106,12 +121,16 @@ export function isFirestorePersistenceEnabled() {
   return isFirebaseConfigured() && Boolean(getFirestoreDb());
 }
 
-export async function loadPersistentPaperState(ledgerId = DEFAULT_PAPER_LEDGER_ID) {
+export function buildOwnerLedgerDocumentId(ledgerId: string, ownerUid: string) {
+  return `${ownerUid}__${ledgerId}`;
+}
+
+export async function loadPersistentPaperState(owner: LedgerOwnerIdentity, ledgerId = DEFAULT_PAPER_LEDGER_ID) {
   const db = getFirestoreDb();
   if (!db || !isFirebaseConfigured()) return { source: 'local' as const, state: null };
 
   try {
-    const snapshot = await getDoc(doc(db, COLLECTION_NAME, ledgerId));
+    const snapshot = await getDoc(doc(db, COLLECTION_NAME, buildOwnerLedgerDocumentId(ledgerId, owner.uid)));
     if (!snapshot.exists()) return { source: 'firestore' as const, state: null };
     const state = sanitizeState({ ...(snapshot.data() as Partial<PersistentPaperState>), source: 'firestore' });
     writePersistentPaperState(state);
@@ -123,8 +142,17 @@ export async function loadPersistentPaperState(ledgerId = DEFAULT_PAPER_LEDGER_I
 
 let saveTimer: number | null = null;
 
-export function persistPaperState(state: Partial<PersistentPaperState>, ledgerId = DEFAULT_PAPER_LEDGER_ID) {
-  const nextState = sanitizeState(state);
+type PersistResult =
+  | { persisted: true; documentId: string }
+  | { persisted: false; reason: 'firebase-not-configured' | 'auth-required' };
+
+export function persistPaperState(state: Partial<PersistentPaperState>, owner: LedgerOwnerIdentity | null, ledgerId = DEFAULT_PAPER_LEDGER_ID): Promise<PersistResult> {
+  const nextState = sanitizeState({
+    ...state,
+    ownerUid: owner?.uid ?? state.ownerUid ?? null,
+    ownerEmail: owner?.email ?? state.ownerEmail ?? null,
+    ownerDisplayName: owner?.displayName ?? state.ownerDisplayName ?? null,
+  });
   writePersistentPaperState(nextState);
 
   const db = getFirestoreDb();
@@ -132,12 +160,23 @@ export function persistPaperState(state: Partial<PersistentPaperState>, ledgerId
     return Promise.resolve({ persisted: false as const, reason: 'firebase-not-configured' as const });
   }
 
+  if (!owner?.uid) {
+    return Promise.resolve({ persisted: false as const, reason: 'auth-required' as const });
+  }
+
   if (saveTimer !== null) window.clearTimeout(saveTimer);
 
-  return new Promise<{ persisted: true } | { persisted: false; reason: 'firebase-not-configured' }>((resolve) => {
+  const documentId = buildOwnerLedgerDocumentId(ledgerId, owner.uid);
+
+  return new Promise<PersistResult>((resolve) => {
     saveTimer = window.setTimeout(() => {
-      void setDoc(doc(db, COLLECTION_NAME, ledgerId), {
+      void setDoc(doc(db, COLLECTION_NAME, documentId), {
         ...nextState,
+        ownerUid: owner.uid,
+        ownerEmail: owner.email ?? null,
+        ownerDisplayName: owner.displayName ?? null,
+        baseLedgerId: ledgerId,
+        documentId,
         botState: {
           ...nextState.botState,
           mode: 'paper',
@@ -147,8 +186,8 @@ export function persistPaperState(state: Partial<PersistentPaperState>, ledgerId
         firebaseProjectId: getFirebaseProjectId(),
         updatedAt: serverTimestamp(),
       }, { merge: true })
-        .then(() => resolve({ persisted: true }))
-        .catch(() => resolve({ persisted: false, reason: 'firebase-not-configured' }));
+        .then(() => resolve({ persisted: true, documentId }))
+        .catch(() => resolve({ persisted: false, reason: 'auth-required' }));
     }, 400);
   });
 }

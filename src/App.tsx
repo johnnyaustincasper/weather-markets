@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { User } from 'firebase/auth';
 import { getMockMarkets } from './data/mockMarkets';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
 import {
@@ -30,9 +31,15 @@ import {
   isFirestorePersistenceEnabled,
   loadPersistentPaperState,
   persistPaperState,
+  type LedgerOwnerIdentity,
 } from './services/paperPersistence';
-import { createPaperBotLoopState } from './services/paperBotLoop';
-import { getFirebaseProjectId } from './lib/firebase';
+import { createPaperBotLoopState, getPaperBotCadenceLabel, runPaperBotTick, type PaperBotLoopState } from './services/paperBotLoop';
+import {
+  getFirebaseProjectId,
+  onFirebaseAuthChanged,
+  signInToFirebase,
+  signOutFromFirebase,
+} from './lib/firebase';
 import type { MarketFeedMeta, QuoteStatus, WeatherMarket } from './types';
 
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
@@ -229,6 +236,9 @@ const directionLabel = (direction: 'buy-yes' | 'buy-no' | 'stand-aside') => {
 };
 
 function App() {
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
   const [markets, setMarkets] = useState<WeatherMarket[]>([]);
   const [previousMarkets, setPreviousMarkets] = useState<Record<string, WeatherMarket>>({});
   const [meta, setMeta] = useState<MarketFeedMeta | null>(null);
@@ -243,15 +253,59 @@ function App() {
   const [paperExecutionProfile, setPaperExecutionProfile] = useState<PaperExecutionProfile>(() => loadPaperExecutionProfile());
   const [paperBlotter, setPaperBlotter] = useState<Record<string, PaperBlotterEntry>>(() => getPaperBlotter());
   const [paperOrders, setPaperOrders] = useState<Record<string, PaperOrder[]>>(() => getPaperOrders());
+  const [paperBotState, setPaperBotState] = useState<PaperBotLoopState>(() => createPaperBotLoopState({ lastHydratedAt: null, lastPersistedAt: null }));
   const [paperOrderDrafts, setPaperOrderDrafts] = useState<Record<string, { quantity: number; limitPrice: number; note: string }>>({});
   const [paperRepriceMeta, setPaperRepriceMeta] = useState<{ at: string; changedCount: number } | null>(null);
   const [selectedReviewMarketId, setSelectedReviewMarketId] = useState('');
   const [persistenceStatus, setPersistenceStatus] = useState<{ mode: 'local' | 'firestore'; detail: string }>({
     mode: isFirestorePersistenceEnabled() ? 'firestore' : 'local',
     detail: isFirestorePersistenceEnabled()
-      ? `Firestore ledger ${DEFAULT_PAPER_LEDGER_ID} in project ${getFirebaseProjectId()}.`
+      ? `Firebase is configured for project ${getFirebaseProjectId()}, but browser persistence stays local until you sign in.`
       : 'Browser-local paper ledger. Add Firebase env vars to enable durable backend persistence.',
   });
+
+  const ledgerOwner = useMemo<LedgerOwnerIdentity | null>(() => authUser ? ({
+    uid: authUser.uid,
+    email: authUser.email,
+    displayName: authUser.displayName,
+  }) : null, [authUser]);
+
+  useEffect(() => onFirebaseAuthChanged((user) => {
+    setAuthUser(user);
+    setAuthReady(true);
+  }), []);
+
+  const handleSignIn = useCallback(async () => {
+    try {
+      setAuthBusy(true);
+      await signInToFirebase();
+    } catch (error) {
+      setPersistenceStatus({
+        mode: 'local',
+        detail: error instanceof Error ? `Firebase sign-in failed, local browser state still active: ${error.message}` : 'Firebase sign-in failed, local browser state still active.',
+      });
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [ledgerOwner]);
+
+  const handleSignOut = useCallback(async () => {
+    try {
+      setAuthBusy(true);
+      await signOutFromFirebase();
+      setPersistenceStatus({
+        mode: 'local',
+        detail: 'Signed out, so browser-local paper state remains available but Firestore sync is paused.',
+      });
+    } catch (error) {
+      setPersistenceStatus({
+        mode: 'local',
+        detail: error instanceof Error ? `Sign-out hit a local-only fallback: ${error.message}` : 'Sign-out hit a local-only fallback.',
+      });
+    } finally {
+      setAuthBusy(false);
+    }
+  }, []);
 
   const fetchMarkets = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -330,14 +384,14 @@ function App() {
     let active = true;
 
     void (async () => {
-      if (!isFirestorePersistenceEnabled()) return;
+      if (!isFirestorePersistenceEnabled() || !ledgerOwner) return;
       try {
-        const result = await loadPersistentPaperState(DEFAULT_PAPER_LEDGER_ID);
+        const result = await loadPersistentPaperState(ledgerOwner, DEFAULT_PAPER_LEDGER_ID);
         if (!active || !result.state) {
           if (active) {
             setPersistenceStatus({
               mode: 'firestore',
-              detail: `Firestore is configured for ${getFirebaseProjectId()}, no remote paper ledger found yet so local state will seed it.`,
+              detail: `Signed in as ${ledgerOwner.email ?? ledgerOwner.uid}. No remote ledger exists yet, so local state will seed Firestore on the next write.`,
             });
           }
           return;
@@ -348,9 +402,10 @@ function App() {
         setPaperExecutionProfile(result.state.paperExecutionProfile);
         setPaperBlotter(result.state.paperBlotter);
         setPaperOrders(result.state.paperOrders);
+        setPaperBotState(createPaperBotLoopState(result.state.botState));
         setPersistenceStatus({
           mode: 'firestore',
-          detail: `Hydrated paper ledger from Firestore (${getFirebaseProjectId()}/${DEFAULT_PAPER_LEDGER_ID}).`,
+          detail: `Hydrated your Firestore paper ledger (${getFirebaseProjectId()}/${DEFAULT_PAPER_LEDGER_ID}) for ${ledgerOwner.email ?? ledgerOwner.uid}.`,
         });
       } catch (error) {
         if (!active) return;
@@ -382,7 +437,7 @@ function App() {
   }, [paperExecutionProfile]);
 
   useEffect(() => {
-    if (!isFirestorePersistenceEnabled()) return;
+    if (!isFirestorePersistenceEnabled() || !ledgerOwner) return;
 
     const timeout = window.setTimeout(() => {
       void (async () => {
@@ -395,17 +450,26 @@ function App() {
             paperBlotter,
             paperOrders,
             botState: createPaperBotLoopState({
-              lastHydratedAt: new Date().toISOString(),
+              ...paperBotState,
+              lastHydratedAt: paperBotState.lastHydratedAt ?? new Date().toISOString(),
               lastPersistedAt: null,
             }),
             syncedAt: new Date().toISOString(),
             source: 'local',
-          }, DEFAULT_PAPER_LEDGER_ID);
+          }, ledgerOwner, DEFAULT_PAPER_LEDGER_ID);
 
-          if (!result.persisted) return;
+          if (!result.persisted) {
+            setPersistenceStatus({
+              mode: 'local',
+              detail: result.reason === 'auth-required'
+                ? 'Firebase is configured, but Firestore sync is paused until you sign in with a trusted account.'
+                : 'Firebase config is incomplete, so paper state is staying local-only.',
+            });
+            return;
+          }
           setPersistenceStatus({
             mode: 'firestore',
-            detail: `Persisting paper ledger to Firestore (${getFirebaseProjectId()}/${DEFAULT_PAPER_LEDGER_ID}).`,
+            detail: `Persisting owner-scoped paper ledger to Firestore (${getFirebaseProjectId()}/${result.documentId}).`,
           });
         } catch (error) {
           setPersistenceStatus({
@@ -417,7 +481,45 @@ function App() {
     }, 400);
 
     return () => window.clearTimeout(timeout);
-  }, [watchIds, paperState, paperExecutionProfile, paperBlotter, paperOrders]);
+  }, [watchIds, paperState, paperExecutionProfile, paperBlotter, paperOrders, paperBotState]);
+
+  const runPaperBotNow = useCallback(() => {
+    if (!markets.length) return;
+
+    const now = new Date().toISOString();
+    const result = runPaperBotTick({
+      state: {
+        version: 1,
+        ownerUid: ledgerOwner?.uid ?? null,
+        ownerEmail: ledgerOwner?.email ?? null,
+        ownerDisplayName: ledgerOwner?.displayName ?? null,
+        watchIds,
+        paperState,
+        paperExecutionProfile,
+        paperBlotter,
+        paperOrders,
+        botState: paperBotState,
+        syncedAt: now,
+        source: persistenceStatus.mode,
+      },
+      markets,
+      ownerId: `ui-${DEFAULT_PAPER_LEDGER_ID}`,
+      now,
+    });
+
+    setPaperState(result.state.paperState);
+    setPaperBotState(createPaperBotLoopState(result.state.botState));
+  }, [ledgerOwner, markets, paperBlotter, paperBotState, paperExecutionProfile, paperOrders, paperState, persistenceStatus.mode, watchIds]);
+
+  useEffect(() => {
+    if (!paperBotState.enabled || !markets.length) return;
+
+    const interval = window.setInterval(() => {
+      runPaperBotNow();
+    }, Math.max(paperBotState.cadenceMs, 15_000));
+
+    return () => window.clearInterval(interval);
+  }, [markets.length, paperBotState.cadenceMs, paperBotState.enabled, runPaperBotNow]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -468,6 +570,11 @@ function App() {
   const selectedHistory = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
   const paperPerformance = useMemo(() => summarizePaperPerformance(paperBlotter), [paperBlotter]);
+  const paperBotRuntime = useMemo(() => Object.values(paperBotState.marketRuntime), [paperBotState.marketRuntime]);
+  const paperBotHotMarkets = useMemo(() => paperBotRuntime
+    .filter((item) => item.state === 'queued' || item.state === 'active' || item.consecutiveWouldTradeTicks > 0)
+    .sort((left, right) => right.consecutiveWouldTradeTicks - left.consecutiveWouldTradeTicks)
+    .slice(0, 5), [paperBotRuntime]);
   const exposureSummary = useMemo(() => {
     const tracked = displayMarkets
       .map((market) => {
@@ -657,6 +764,30 @@ function App() {
 
   const toggleWatch = (marketId: string) => {
     setWatchIds((current) => current.includes(marketId) ? current.filter((id) => id !== marketId) : [...current, marketId]);
+  };
+
+  const togglePaperBotEnabled = () => {
+    setPaperBotState((current) => createPaperBotLoopState({
+      ...current,
+      enabled: !current.enabled,
+      status: !current.enabled ? 'idle' : 'blocked',
+      nextDueAt: !current.enabled ? new Date(Date.now() + current.cadenceMs).toISOString() : null,
+      lastSummary: !current.enabled ? 'Paper bot enabled from the operator console.' : 'Paper bot paused from the operator console.',
+    }));
+  };
+
+  const cyclePaperBotCadence = () => {
+    setPaperBotState((current) => {
+      const options = [60_000, 180_000, 300_000];
+      const currentIndex = options.indexOf(current.cadenceMs);
+      const nextCadenceMs = options[(currentIndex + 1) % options.length] ?? options[0];
+      return createPaperBotLoopState({
+        ...current,
+        cadenceMs: nextCadenceMs,
+        nextDueAt: current.enabled ? new Date(Date.now() + nextCadenceMs).toISOString() : null,
+        lastSummary: `Paper bot cadence set to ${getPaperBotCadenceLabel(nextCadenceMs)}.`,
+      });
+    });
   };
 
   const setMarketPaperState = (marketId: string, state: PaperPositionState) => {
@@ -889,6 +1020,80 @@ function App() {
         <section className={`panel system-banner ${persistenceStatus.mode === 'firestore' ? 'tone-good' : 'tone-warn'}`}>
           <strong>{persistenceStatus.mode === 'firestore' ? 'Backend persistence online' : 'Local-only persistence'}</strong>
           <span>{persistenceStatus.detail}</span>
+        </section>
+        {isFirestorePersistenceEnabled() && (
+          <section className={`panel system-banner ${ledgerOwner ? 'tone-good' : 'tone-warn'}`}>
+            <strong>{ledgerOwner ? 'Trusted identity connected' : 'Sign in to unlock Firestore persistence'}</strong>
+            <span>
+              {ledgerOwner
+                ? `Signed in as ${ledgerOwner.displayName ?? ledgerOwner.email ?? ledgerOwner.uid}. Ledger writes are owner-scoped.`
+                : authReady
+                  ? 'Use Firebase Auth before syncing paper state to Firestore. Local browser persistence still works without sign-in.'
+                  : 'Checking Firebase Auth session...'}
+            </span>
+            <div className="table-actions">
+              {ledgerOwner ? (
+                <button className="command-button" onClick={() => void handleSignOut()} disabled={authBusy}>
+                  {authBusy ? 'Working…' : 'Sign out'}
+                </button>
+              ) : (
+                <button className="command-button" onClick={() => void handleSignIn()} disabled={authBusy || !authReady}>
+                  {authBusy ? 'Connecting…' : 'Sign in with Google'}
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+        <section className="panel review-panel portfolio-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Bot control</p>
+              <h2>Persistent paper operator</h2>
+              <p className="subtle panel-intro">The paper bot is now wired into live app state, so queued and active decisions persist through refreshes and backend hydration.</p>
+            </div>
+            <div className="table-actions">
+              <button className={`command-button ${paperBotState.enabled ? 'active' : ''}`} onClick={togglePaperBotEnabled}>{paperBotState.enabled ? 'Pause bot' : 'Enable bot'}</button>
+              <button className="command-button" onClick={cyclePaperBotCadence}>Cadence {getPaperBotCadenceLabel(paperBotState.cadenceMs)}</button>
+              <button className="command-button" onClick={runPaperBotNow} disabled={!markets.length}>Run now</button>
+            </div>
+          </div>
+          <div className="execution-summary-grid review-metrics">
+            <ExecutionSummaryCard label="Status" value={paperBotState.status.toUpperCase()} detail={paperBotState.lastSummary ?? 'No bot tick yet.'} toneClass={paperBotState.enabled ? 'positive' : undefined} />
+            <ExecutionSummaryCard label="Ticks" value={String(paperBotState.tickCount)} detail={`Cadence ${getPaperBotCadenceLabel(paperBotState.cadenceMs)}`} />
+            <ExecutionSummaryCard label="Next due" value={paperBotState.nextDueAt ? formatClock(paperBotState.nextDueAt) : '--'} detail={paperBotState.nextDueAt ? formatDateTime(paperBotState.nextDueAt) : 'Bot is paused.'} />
+            <ExecutionSummaryCard label="Hot markets" value={String(paperBotHotMarkets.length)} detail="Queued, active, or building toward activation." toneClass={paperBotHotMarkets.length ? 'positive' : undefined} />
+          </div>
+          <div className="review-diagnostics-grid after-action-grid">
+            <ReviewListCard
+              title="Recent bot actions"
+              tone="good"
+              items={paperBotState.recentActions.map((action) => action.summary)}
+              emptyLabel="Run the bot once and its action trail will appear here."
+            />
+            <div className="intel-card">
+              <div className="source-title-row review-list-header">
+                <strong>Runtime watch</strong>
+                <span className="badge soft">{paperBotHotMarkets.length} active lanes</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                {paperBotHotMarkets.length ? paperBotHotMarkets.map((runtime) => (
+                  <div className="stack-row review-row" key={runtime.marketId}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{displayMarkets.find((market) => market.id === runtime.marketId)?.title ?? runtime.marketId}</strong>
+                        <span className={`status-pill ${paperState[runtime.marketId]?.state === 'active' ? 'tone-good' : 'tone-warn'}`}>{runtime.state.toUpperCase()}</span>
+                      </div>
+                      <p>{runtime.note}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>{runtime.decision}</small>
+                      <small>{runtime.consecutiveWouldTradeTicks} ticks</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">No queued or active bot lanes yet.</p>}
+              </div>
+            </div>
+          </div>
         </section>
         {loading && <section className="panel system-banner"><strong>Mission board loading</strong><span>Pulling contracts, quotes, and weather-model inputs.</span></section>}
 

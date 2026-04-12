@@ -1,4 +1,15 @@
 import { getApps, initializeApp, type FirebaseApp } from 'firebase/app';
+import {
+  browserLocalPersistence,
+  getAuth,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  setPersistence,
+  signInWithPopup,
+  signOut,
+  type Auth,
+  type User,
+} from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 
 const firebaseConfig = {
@@ -19,6 +30,8 @@ const requiredKeys = [
   'VITE_FIREBASE_MESSAGING_SENDER_ID',
   'VITE_FIREBASE_APP_ID',
 ] as const;
+
+let authPersistenceReady: Promise<void> | null = null;
 
 export function getFirebaseEnvStatus() {
   const missing = requiredKeys.filter((key) => !import.meta.env[key]);
@@ -51,4 +64,48 @@ export function getFirestoreDb(): Firestore | null {
   return getFirestore(getFirebaseApp());
 }
 
+export function getFirebaseAuth(): Auth | null {
+  if (!isFirebaseConfigured()) return null;
+  return getAuth(getFirebaseApp());
+}
+
+async function ensureAuthPersistence() {
+  const auth = getFirebaseAuth();
+  if (!auth || typeof window === 'undefined') return;
+
+  if (!authPersistenceReady) {
+    authPersistenceReady = setPersistence(auth, browserLocalPersistence).then(() => undefined);
+  }
+
+  await authPersistenceReady;
+}
+
+export async function signInToFirebase() {
+  const auth = getFirebaseAuth();
+  if (!auth) throw new Error('Firebase is not configured.');
+
+  await ensureAuthPersistence();
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: 'select_account' });
+  return signInWithPopup(auth, provider);
+}
+
+export async function signOutFromFirebase() {
+  const auth = getFirebaseAuth();
+  if (!auth) return;
+  await signOut(auth);
+}
+
+export function onFirebaseAuthChanged(callback: (user: User | null) => void) {
+  const auth = getFirebaseAuth();
+  if (!auth) {
+    callback(null);
+    return () => undefined;
+  }
+
+  void ensureAuthPersistence();
+  return onAuthStateChanged(auth, callback);
+}
+
+export type { User };
 export { firebaseConfig };
