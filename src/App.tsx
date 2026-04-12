@@ -1242,7 +1242,7 @@ function App() {
             </div>
           </section>
         )}
-        <section className="panel review-panel portfolio-panel">
+        <section className="panel review-panel portfolio-panel" data-panel="bot.supervision">
           <div className="panel-header">
             <div>
               <p className="eyebrow">Bot control</p>
@@ -1342,9 +1342,9 @@ function App() {
             </div>
           </div>
         </section>
-        {loading && <section className="panel system-banner"><strong>Mission board loading</strong><span>Pulling contracts, quotes, and weather-model inputs.</span></section>}
+        {loading && <section className="panel system-banner" data-panel="sys.loading"><strong>Mission board loading</strong><span>Pulling contracts, quotes, and weather-model inputs.</span></section>}
 
-        <section className="panel review-panel execution-visibility-panel">
+        <section className="panel review-panel execution-visibility-panel" data-panel="acct.execution">
           <div className="panel-header">
             <div>
               <p className="eyebrow">Paper execution visibility</p>
@@ -1422,7 +1422,7 @@ function App() {
           </div>
         </section>
 
-        <section className="panel ops-priority-panel">
+        <section className="panel ops-priority-panel" data-panel="ops.priority">
           <div className="panel-header">
             <div>
               <p className="eyebrow">Operator stack</p>
@@ -1530,7 +1530,7 @@ function App() {
         </section>
 
         <section className="operations-grid">
-          <section className="panel theater-panel">
+          <section className="panel theater-panel" data-panel="market.board">
             <div className="panel-header">
               <div>
                 <p className="eyebrow">Operational theater</p>
@@ -1574,7 +1574,7 @@ function App() {
           </section>
 
           <div className="right-column">
-            <section className="panel command-panel">
+            <section className="panel command-panel" data-panel="trade.console">
               <div className="panel-header">
                 <div>
                   <p className="eyebrow">Command brief</p>
@@ -1733,7 +1733,7 @@ function App() {
               )}
             </section>
 
-            <section className="panel telemetry-panel">
+            <section className="panel telemetry-panel" data-panel="signal.telemetry">
               <div className="panel-header">
                 <div>
                   <p className="eyebrow">Telemetry</p>
@@ -1787,7 +1787,7 @@ function App() {
           </div>
         </section>
 
-        <section className="panel review-panel portfolio-panel">
+        <section className="panel review-panel portfolio-panel" data-panel="desk.risk">
           <div className="panel-header">
             <div>
               <p className="eyebrow">Desk risk</p>
@@ -1862,7 +1862,7 @@ function App() {
           </div>
         </section>
 
-        <section className="panel review-panel">
+        <section className="panel review-panel" data-panel="posttrade.review">
           <div className="panel-header">
             <div>
               <p className="eyebrow">Performance review</p>
