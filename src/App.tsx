@@ -90,6 +90,12 @@ type WorkflowStage = {
   onAction?: () => void;
 };
 
+type CommandAction = {
+  title: string;
+  detail: string;
+  tone: AlertTone | 'muted';
+};
+
 const loadWatchIds = () => {
   if (typeof window === 'undefined') return [] as string[];
   try {
@@ -399,9 +405,24 @@ function App() {
     });
   }, [paperOrders]);
 
+  const rankedMarkets = useMemo(() => {
+    return displayMarkets
+      .map((market) => {
+        const plan = paperPlans[market.id];
+        const delta = marketDeltas[market.id];
+        const actionability = plan.decision === 'would-trade' ? 3 : plan.decision === 'watch' ? 2 : 1;
+        const freshnessPenalty = market.freshnessMinutes >= 120 ? 0.18 : market.freshnessMinutes >= 60 ? 0.08 : 0;
+        const executionPenalty = market.quoteStatus === 'empty' ? 0.25 : market.quoteStatus === 'stale' ? 0.16 : market.quoteStatus === 'wide' ? 0.08 : 0;
+        const scenarioPenalty = market.dataOrigin === 'curated-watchlist' ? 0.12 : 0;
+        const priorityScore = Math.abs(market.edge) * 2.4 + market.confidence + actionability * 0.2 - freshnessPenalty - executionPenalty - scenarioPenalty;
+        return { market, plan, delta, priorityScore };
+      })
+      .sort((left, right) => right.priorityScore - left.priorityScore);
+  }, [displayMarkets, marketDeltas, paperPlans]);
+
   const liveTradeCount = displayMarkets.filter((market) => market.dataOrigin !== 'curated-watchlist' && paperPlans[market.id]?.decision === 'would-trade').length;
   const watchCount = displayMarkets.filter((market) => market.dataOrigin === 'curated-watchlist' || paperPlans[market.id]?.decision === 'watch').length;
-  const topTrade = displayMarkets[0];
+  const topTrade = rankedMarkets[0]?.market;
   const paperQueueCount = Object.values(paperState).filter((item) => item.state === 'queued' || item.state === 'active').length;
   const performanceHeadline = paperPerformance.totals.closed
     ? `${paperPerformance.totals.wins}-${paperPerformance.totals.losses}${paperPerformance.totals.flats ? `-${paperPerformance.totals.flats}` : ''}`
@@ -505,6 +526,11 @@ function App() {
 
   const selectedPlan = selectedMarket ? paperPlans[selectedMarket.id] : null;
   const selectedDelta = selectedMarket ? marketDeltas[selectedMarket.id] : null;
+  const priorityQueue = rankedMarkets.slice(0, 5);
+  const opportunityBoard = rankedMarkets.filter(({ plan, market }) => plan.decision !== 'no-trade' || market.dataOrigin === 'curated-watchlist').slice(0, 4);
+  const threatBoard = rankedMarkets
+    .filter(({ delta, market }) => delta.alerts.some((alert) => alert.tone === 'bad' || alert.tone === 'warn') || market.quoteStatus === 'stale' || market.freshnessMinutes >= 90)
+    .slice(0, 4);
   const selectedBlotter = selectedMarket ? paperBlotter[selectedMarket.id] : null;
   const selectedPaperState = selectedMarket ? paperState[selectedMarket.id] : null;
   const selectedOrders = selectedMarket ? (paperOrders[selectedMarket.id] ?? []) : [];
@@ -512,6 +538,49 @@ function App() {
   const selectedFilledOrders = selectedOrders.filter((order) => order.filledQuantity > 0);
   const selectedLatestFilledOrder = selectedFilledOrders[0] ?? null;
   const selectedExitReady = Boolean(selectedBlotter?.exitSuggestion.shouldClose);
+  const selectedActionQueue: CommandAction[] = selectedMarket && selectedPlan
+    ? [
+        selectedMarket.dataOrigin === 'curated-watchlist'
+          ? {
+              title: 'Wait for listing',
+              detail: 'Keep this in scouting mode until a real contract appears with matching settlement wording.',
+              tone: 'warn',
+            }
+          : selectedPlan.decision === 'would-trade'
+            ? {
+                title: `Stage ${paperDirectionLabel(selectedPlan.direction)}`,
+                detail: `Actionable now if execution holds. Target ${selectedPlan.sizing.suggestedUnits} units and only work orders while the edge stays above the entry bar.`,
+                tone: 'good',
+              }
+            : {
+                title: 'Hold fire',
+                detail: 'Do not stage size yet. Let edge, confidence, and execution line up together first.',
+                tone: 'muted',
+              },
+        selectedWorkingOrders.length
+          ? {
+              title: 'Manage working risk',
+              detail: `${selectedWorkingOrders.length} order${selectedWorkingOrders.length > 1 ? 's are' : ' is'} already working. Reprice only if the quote shifts or the thesis improves.`,
+              tone: 'warn',
+            }
+          : {
+              title: 'No working order',
+              detail: 'Nothing is staged in the book yet, so the next action lives in the order ticket below.',
+              tone: 'muted',
+            },
+        selectedExitReady
+          ? {
+              title: 'Exit check triggered',
+              detail: selectedBlotter?.exitSuggestion.summary ?? 'The blotter wants attention now.',
+              tone: 'bad',
+            }
+          : {
+              title: 'Monitor exit tripwires',
+              detail: selectedPlan.stopTrigger,
+              tone: selectedPaperState?.state === 'active' ? 'warn' : 'muted',
+            },
+      ]
+    : [];
   const selectedOrderDraft = selectedMarket && selectedPlan
     ? (paperOrderDrafts[selectedMarket.id] ?? { quantity: selectedPlan.sizing.suggestedUnits, limitPrice: clampOrderPrice(selectedMarket.impliedProbability), note: '' })
     : null;
@@ -601,6 +670,113 @@ function App() {
 
         {error && <section className="panel system-banner tone-bad"><strong>System advisory</strong><span>{error}</span></section>}
         {loading && <section className="panel system-banner"><strong>Mission board loading</strong><span>Pulling contracts, quotes, and weather-model inputs.</span></section>}
+
+        <section className="panel ops-priority-panel">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Operator stack</p>
+              <h2>What needs action now</h2>
+              <p className="subtle panel-intro">The board below sorts immediate opportunities, current threats, and the next three actions for the selected campaign.</p>
+            </div>
+          </div>
+
+          <div className="ops-priority-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Priority queue</span>
+                  <p className="subtle">Best use of attention right now.</p>
+                </div>
+                <span className="badge soft">Top {priorityQueue.length}</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                {priorityQueue.map(({ market, plan, priorityScore }, index) => (
+                  <button key={market.id} type="button" className={`review-selector ${selectedMarket?.id === market.id ? 'selected' : ''}`} onClick={() => setSelectedId(market.id)}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>#{index + 1} {market.title}</strong>
+                        <span className={`status-pill ${paperDecisionToneClass(plan.decision)}`}>{market.dataOrigin === 'curated-watchlist' ? 'Scout' : paperDecisionLabel(plan.decision)}</span>
+                      </div>
+                      <p>{market.dataOrigin === 'curated-watchlist' ? 'Scenario only' : `${paperDirectionLabel(plan.direction)} ready if tape holds`} · Edge {signedPct(market.edge)} · Confidence {pct(market.confidence)}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>Score {priorityScore.toFixed(2)}</small>
+                      <small>{freshnessLabel(market.freshnessMinutes)}</small>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Threats and opportunities</span>
+                  <p className="subtle">Separate upside from board hygiene so the desk knows what changed.</p>
+                </div>
+              </div>
+              <div className="ops-split-grid">
+                <div className="stack-list compact-review-list">
+                  <div className="source-title-row review-list-header">
+                    <strong>Opportunities</strong>
+                    <span className="status-pill tone-good">{opportunityBoard.length}</span>
+                  </div>
+                  {opportunityBoard.map(({ market, plan }) => (
+                    <div className="stack-row review-row" key={market.id}>
+                      <div>
+                        <div className="source-title-row">
+                          <strong>{market.title}</strong>
+                          <span className={`status-pill ${paperDecisionToneClass(plan.decision)}`}>{paperDirectionLabel(plan.direction)}</span>
+                        </div>
+                        <p>{plan.entryTrigger}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div className="stack-list compact-review-list">
+                  <div className="source-title-row review-list-header">
+                    <strong>Threats</strong>
+                    <span className="status-pill tone-bad">{threatBoard.length}</span>
+                  </div>
+                  {threatBoard.length ? threatBoard.map(({ market, delta }) => (
+                    <div className="stack-row review-row" key={market.id}>
+                      <div>
+                        <div className="source-title-row">
+                          <strong>{market.title}</strong>
+                          <span className={`status-pill ${statusToneClass(delta.status)}`}>{statusLabel(delta.status)}</span>
+                        </div>
+                        <p>{delta.alerts[0]?.detail ?? `Watch freshness ${freshnessLabel(market.freshnessMinutes)} and quote state ${market.quoteStatus.toUpperCase()}.`}</p>
+                      </div>
+                    </div>
+                  )) : <p className="subtle">No urgent board threats. The scanner is stable.</p>}
+                </div>
+              </div>
+            </div>
+
+            <div className="intel-card next-actions-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Next actions for selected market</span>
+                  <p className="subtle">A simple operator checklist, not just analytics.</p>
+                </div>
+                {selectedMarket && <span className={`status-pill ${selectedMarket.dataOrigin === 'curated-watchlist' ? 'tone-warn' : 'tone-good'}`}>{selectedMarket.dataOrigin === 'curated-watchlist' ? 'Scouting' : 'Execution'}</span>}
+              </div>
+              <div className="stack-list compact-review-list">
+                {selectedActionQueue.length ? selectedActionQueue.map((item) => (
+                  <div className="stack-row review-row" key={item.title}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{item.title}</strong>
+                        <span className={`status-pill tone-${item.tone}`}>{item.tone === 'good' ? 'Do now' : item.tone === 'bad' ? 'Urgent' : item.tone === 'warn' ? 'Watch' : 'Stand by'}</span>
+                      </div>
+                      <p>{item.detail}</p>
+                    </div>
+                  </div>
+                )) : <p className="subtle">Select a market to get a task stack.</p>}
+              </div>
+            </div>
+          </div>
+        </section>
 
         <section className="operations-grid">
           <section className="panel theater-panel">

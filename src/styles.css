@@ -75,6 +75,7 @@ li + li { margin-top: 0.35rem; }
 }
 
 .mission-hero,
+.ops-priority-panel,
 .theater-panel,
 .command-panel,
 .telemetry-panel,
@@ -130,16 +131,20 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .hero-status { margin: 14px 0 0; max-width: 80ch; }
 
 .hero-rail,
+.ops-priority-grid,
 .command-summary-grid,
 .doctrine-grid,
 .intel-grid,
 .execution-summary-grid,
 .support-grid,
- .review-diagnostics-grid,
+.review-diagnostics-grid,
 .footer-strip,
+.ops-split-grid,
 .telemetry-lanes,
 .tuning-grid,
 .signal-strip { display: grid; gap: 12px; }
+.ops-priority-grid { grid-template-columns: 1.15fr 1.35fr 1fr; align-items: start; }
+.ops-split-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .hero-rail,
 .command-summary-grid,
 .execution-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -338,6 +343,9 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .workflow-tone-good { box-shadow: inset 0 0 0 1px rgba(123, 255, 180, 0.12); }
 .workflow-tone-warn { box-shadow: inset 0 0 0 1px rgba(246, 211, 106, 0.12); }
 .workflow-tone-bad { box-shadow: inset 0 0 0 1px rgba(255, 139, 139, 0.12); }
+.next-actions-card .stack-row {
+  border-left: 3px solid rgba(125, 211, 252, 0.18);
+}
 .order-ticket-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -408,12 +416,14 @@ h2 { font-size: 1.15rem; text-transform: uppercase; }
 .review-list-header { margin-bottom: 10px; }
 
 @media (max-width: 1320px) {
+  .ops-priority-grid,
   .operations-grid,
   .mission-hero,
   .footer-strip { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 980px) {
+  .ops-split-grid,
   .theater-grid,
   .doctrine-grid,
   .intel-grid,
