@@ -527,6 +527,25 @@ tbody tr:hover,
   margin-top: 18px;
 }
 
+.paper-engine-panel {
+  display: grid;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.paper-engine-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.paper-state-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .detail-copy p,
 .operator-card p {
   margin: 8px 0 0;

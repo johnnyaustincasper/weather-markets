@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
+import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
 import {
   DEFAULT_WATCHER_REGIME_TUNING,
   captureMarketHistory,
@@ -16,6 +17,7 @@ import type { MarketFeedMeta, QuoteStatus, WeatherMarket } from './types';
 
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
 const REGIME_TUNING_STORAGE_KEY = 'weather-markets-regime-tuning';
+const PAPER_STATE_STORAGE_KEY = 'weather-markets-paper-state';
 const REFRESH_MS = 90_000;
 const QUOTE_REFRESH_MS = 20_000;
 const MAX_ALERTS = 18;
@@ -81,6 +83,12 @@ type MarketDelta = {
   alerts: MarketAlert[];
 };
 
+type PaperTradeRecord = {
+  state: PaperPositionState;
+  updatedAt: string;
+  note: string;
+};
+
 const loadWatchIds = () => {
   if (typeof window === 'undefined') return [] as string[];
   try {
@@ -89,6 +97,17 @@ const loadWatchIds = () => {
     return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : [];
   } catch {
     return [] as string[];
+  }
+};
+
+const loadPaperState = (): Record<string, PaperTradeRecord> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(PAPER_STATE_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, PaperTradeRecord> : {};
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
   }
 };
 
@@ -322,6 +341,7 @@ function App() {
   const [lastScanAt, setLastScanAt] = useState<string>('');
   const [historyTick, setHistoryTick] = useState(0);
   const [regimeTuning, setRegimeTuning] = useState<WatcherRegimeTuning>(() => loadRegimeTuning());
+  const [paperState, setPaperState] = useState<Record<string, PaperTradeRecord>>(() => loadPaperState());
 
   const fetchMarkets = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -406,6 +426,11 @@ function App() {
   }, [regimeTuning]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(PAPER_STATE_STORAGE_KEY, JSON.stringify(paperState));
+  }, [paperState]);
+
+  useEffect(() => {
     const interval = window.setInterval(() => {
       void fetchMarkets(true);
     }, REFRESH_MS);
@@ -469,9 +494,13 @@ function App() {
   const selectedTrend = useMemo(() => selectedMarket ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
   const selectedHistory = useMemo(() => selectedMarket ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const selectedHistoryWindow = useMemo(() => selectedHistory.slice(-12), [selectedHistory]);
+  const paperPlans = useMemo(() => Object.fromEntries(markets.map((market) => [market.id, buildPaperTradePlan(market)])), [markets]);
   const watchCount = watchIds.filter((id) => markets.some((market) => market.id === id)).length;
   const deterioratingCount = markets.filter((market) => (marketDeltas[market.id]?.freshnessDelta ?? 0) >= 20).length;
   const actionCount = allAlerts.filter((alert) => alert.tone !== 'bad').length;
+  const wouldTradeCount = markets.filter((market) => paperPlans[market.id]?.decision === 'would-trade').length;
+  const queuedPaperCount = Object.values(paperState).filter((item) => item.state === 'queued').length;
+  const activePaperCount = Object.values(paperState).filter((item) => item.state === 'active').length;
 
   const activeRegimePreset = useMemo(() => getActiveRegimePreset(regimeTuning), [regimeTuning]);
   const scanState = useMemo(() => formatScanState(meta, loading, refreshing, error), [meta, loading, refreshing, error]);
@@ -493,6 +522,17 @@ function App() {
 
   const toggleWatch = (marketId: string) => {
     setWatchIds((current) => current.includes(marketId) ? current.filter((id) => id !== marketId) : [...current, marketId]);
+  };
+
+  const setMarketPaperState = (marketId: string, state: PaperPositionState) => {
+    setPaperState((current) => ({
+      ...current,
+      [marketId]: {
+        state,
+        updatedAt: new Date().toISOString(),
+        note: state === 'flat' ? 'Reset to flat paper state.' : state === 'queued' ? 'Queued for paper entry review.' : state === 'active' ? 'Paper position marked active.' : 'Paper position closed locally.',
+      },
+    }));
   };
 
   return (
@@ -554,6 +594,11 @@ function App() {
             <span className="summary-label">Watcher memory</span>
             <strong>{watcherOverview.snapshotsStored} local snapshots stored</strong>
             <span className="subtle">{watcherOverview.risingEdgeCount} names improving edge, {watcherOverview.executionImprovingCount} seeing better execution.</span>
+          </div>
+          <div className="panel summary-card">
+            <span className="summary-label">Paper engine</span>
+            <strong>{wouldTradeCount} markets would trade now</strong>
+            <span className="subtle">{queuedPaperCount} queued and {activePaperCount} active in local paper state, still read-only.</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Execution regimes</span>
@@ -668,6 +713,8 @@ function App() {
                   {markets.map((market) => {
                     const delta = marketDeltas[market.id];
                     const isWatched = watchSet.has(market.id);
+                    const paperPlan = paperPlans[market.id];
+                    const paperRecord = paperState[market.id];
                     return (
                       <tr
                         key={market.id}
@@ -679,6 +726,8 @@ function App() {
                             <strong>{market.title}</strong>
                             <span>{market.location} · {market.expiry}</span>
                             <div className="inline-flags">
+                              <span className={`status-chip ${paperDecisionToneClass(paperPlan.decision)}`}>{paperDecisionLabel(paperPlan.decision)}</span>
+                              {paperRecord && <span className="status-chip tone-muted">Paper {paperRecord.state.toUpperCase()}</span>}
                               {delta.alerts.slice(0, 2).map((alert) => (
                                 <span key={alert.id} className={`status-chip tone-${alert.tone}`}>{alert.summary}</span>
                               ))}
@@ -735,6 +784,8 @@ function App() {
               {markets.map((market) => {
                 const delta = marketDeltas[market.id];
                 const isWatched = watchSet.has(market.id);
+                const paperPlan = paperPlans[market.id];
+                const paperRecord = paperState[market.id];
                 return (
                   <button
                     key={market.id}
@@ -753,7 +804,7 @@ function App() {
                       <span>{freshnessLabel(market.freshnessMinutes)}</span>
                     </div>
                     <div className="market-card-actions">
-                      <span className="subtle">{delta.alerts[0]?.summary ?? 'No new alert yet'}</span>
+                      <span className="subtle">{paperDecisionLabel(paperPlan.decision)}{paperRecord ? ` · ${paperRecord.state}` : ''}</span>
                       <span className={`watch-inline ${isWatched ? 'active' : ''}`}>{isWatched ? 'Watching' : 'Tap detail to watch'}</span>
                     </div>
                   </button>
@@ -785,9 +836,18 @@ function App() {
               </div>
               {selectedMarket && (
                 <>
+                  {(() => {
+                    const paperPlan = paperPlans[selectedMarket.id];
+                    const paperRecord = paperState[selectedMarket.id];
+                    return (
+                      <>
                   <div className="detail-badges">
                     <span className={`status-chip ${statusToneClass(marketDeltas[selectedMarket.id]?.statusTo ?? 'live')}`}>Status {marketDeltas[selectedMarket.id]?.statusTo.toUpperCase()}</span>
                     <span className={`status-chip ${quoteToneClass(selectedMarket.quoteStatus)}`}>Quote {selectedMarket.quoteStatus.toUpperCase()}</span>
+                    <span className={`status-chip ${paperDecisionToneClass(paperPlan.decision)}`}>{paperDecisionLabel(paperPlan.decision)}</span>
+                    <span className={`status-chip ${convictionToneClass(paperPlan.conviction)}`}>{paperPlan.conviction.toUpperCase()} conviction</span>
+                    <span className="status-chip tone-muted">Direction {paperDirectionLabel(paperPlan.direction)}</span>
+                    {paperRecord && <span className="status-chip tone-muted">Paper {paperRecord.state.toUpperCase()}</span>}
                     {marketDeltas[selectedMarket.id]?.alerts.slice(0, 3).map((alert) => (
                       <span key={alert.id} className={`status-chip tone-${alert.tone}`}>{alert.summary}</span>
                     ))}
@@ -808,15 +868,58 @@ function App() {
                   )}
                   <div className="operator-grid">
                     <ActionCard
-                      title="Primary move"
-                      body={marketDeltas[selectedMarket.id]?.alerts[0]?.detail ?? 'This contract is ranked from the current gap between market odds and live weather-model probabilities. After the next scan, this panel will call out what changed.'}
+                      title="Would trade?"
+                      body={paperPlan.thesis}
                     />
                     <ActionCard
-                      title="Desk action"
-                      body={marketDeltas[selectedMarket.id]?.alerts[0]?.action ?? 'Use watchlist mode for names you want to monitor, then revisit after the next live refresh for a ranked delta.'}
+                      title="Entry trigger"
+                      body={paperPlan.entryTrigger}
+                      emphasis
+                    />
+                    <ActionCard
+                      title="Exit discipline"
+                      body={paperPlan.stopTrigger}
+                    />
+                    <ActionCard
+                      title="Position sizing"
+                      body={paperPlan.sizing.notionalLabel}
                       emphasis
                     />
                   </div>
+                  <section className="paper-engine-panel">
+                    <div className="paper-engine-header">
+                      <div>
+                        <span className="detail-label">Paper trade state</span>
+                        <p className="subtle">Local scaffold only. No exchange actions, no orders sent.</p>
+                      </div>
+                      <div className="paper-state-actions">
+                        <button className={`watch-toggle ${paperRecord?.state === 'flat' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'flat')}>Flat</button>
+                        <button className={`watch-toggle ${paperRecord?.state === 'queued' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'queued')}>Queue</button>
+                        <button className={`watch-toggle ${paperRecord?.state === 'active' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'active')}>Activate</button>
+                        <button className={`watch-toggle ${paperRecord?.state === 'closed' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'closed')}>Close</button>
+                      </div>
+                    </div>
+                    <div className="checklist-grid">
+                      <div className="checklist-card">
+                        <span className="detail-label">Entry checklist</span>
+                        <ul>
+                          {paperPlan.entryCriteria.map((item) => <li key={item.label} className={item.passed ? 'positive' : 'negative'}>{item.label}: {item.value} · {item.passed ? 'pass' : 'fail'}</li>)}
+                        </ul>
+                      </div>
+                      <div className="checklist-card">
+                        <span className="detail-label">Exit checklist</span>
+                        <ul>
+                          {paperPlan.exitCriteria.map((item) => <li key={item}>{item}</li>)}
+                        </ul>
+                      </div>
+                    </div>
+                    <div className="execution-summary-grid">
+                      <ExecutionSummaryCard label="Monitor" value="Live" detail={paperPlan.monitoringTrigger} />
+                      <ExecutionSummaryCard label="Take profit" value="Scale out" detail={paperPlan.takeProfitTrigger} />
+                      <ExecutionSummaryCard label="Initial size" value={`${paperPlan.sizing.suggestedUnits} units`} detail={`Max ${paperPlan.sizing.maxUnits} units, scale in ${paperPlan.sizing.scaleInUnits} at a time.`} />
+                      <ExecutionSummaryCard label="Blockers" value={String(paperPlan.blockers.length)} detail={paperPlan.blockers[0] ?? 'No active blocker, this setup clears the first paper-trade bar.'} toneClass={paperPlan.blockers.length ? 'negative' : 'positive'} />
+                    </div>
+                  </section>
                   {selectedTrend && (
                     <div>
                       <span className="detail-label">Persistent watcher deltas</span>
@@ -894,6 +997,9 @@ function App() {
                       </div>
                     )}
                   </div>
+                      </>
+                    );
+                  })()}
                 </>
               )}
             </section>
@@ -1182,6 +1288,30 @@ function regimeBadgeLabel(regime?: WatcherExecutionRegime) {
   if (regime.kind === 'flip-risk') return 'Flip risk';
   if (regime.kind === 'execution-degrading') return 'Degrading';
   return 'Improving';
+}
+
+function paperDecisionLabel(decision: 'would-trade' | 'watch' | 'no-trade') {
+  if (decision === 'would-trade') return 'Would trade';
+  if (decision === 'watch') return 'Watch only';
+  return 'Would not trade';
+}
+
+function paperDecisionToneClass(decision: 'would-trade' | 'watch' | 'no-trade') {
+  if (decision === 'would-trade') return 'tone-good';
+  if (decision === 'watch') return 'tone-warn';
+  return 'tone-bad';
+}
+
+function paperDirectionLabel(direction: 'buy-yes' | 'buy-no' | 'stand-aside') {
+  if (direction === 'buy-yes') return 'BUY YES';
+  if (direction === 'buy-no') return 'BUY NO';
+  return 'STAND ASIDE';
+}
+
+function convictionToneClass(conviction: 'high' | 'medium' | 'low') {
+  if (conviction === 'high') return 'tone-good';
+  if (conviction === 'medium') return 'tone-warn';
+  return 'tone-muted';
 }
 
 function regimeToneClass(kind?: WatcherExecutionRegime['kind']) {
