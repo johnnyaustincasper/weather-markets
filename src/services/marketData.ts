@@ -102,7 +102,15 @@ type EventScoringProfile = {
 };
 
 const polymarketEventsUrl = 'https://gamma-api.polymarket.com/events?tag_slug=weather&limit=100&active=true&closed=false';
-const userAgent = 'weather-markets-scanner/0.4';
+const polymarketGeneralEventsUrl = 'https://gamma-api.polymarket.com/events?limit=500&active=true&closed=false';
+const userAgent = 'weather-markets-scanner/0.5';
+const WEATHER_DISCOVERY_KEYWORDS = [
+  'weather', 'temperature', 'hottest', 'heat', 'rain', 'rainfall', 'precipitation', 'snow', 'snowfall', 'wind', 'gust',
+  'hurricane', 'storm', 'tornado', 'arctic sea ice', 'sea ice', 'climate', 'global temperature', 'landfall',
+];
+const WEATHER_EXCLUSION_KEYWORDS = [
+  'measles', 'earthquake', 'volcano', 'meteor', 'asteroid', 'wildfire', 'bird flu', 'flu', 'covid',
+];
 const now = () => new Date();
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 const fmtPct = (value: number) => `${Math.round(value * 100)}%`;
@@ -245,8 +253,15 @@ function parseWindSpeedNumber(value?: string) {
 }
 
 function inferObservationWindow(text: string) {
-  const match = text.match(/\b(today|tonight|tomorrow|this weekend|this week|next week|by [A-Z][a-z]+\s+\d{1,2}|through [A-Z][a-z]+\s+\d{1,2})\b/i);
+  const match = text.match(/\b(today|tonight|tomorrow|this weekend|this week|next week|this summer|this season|in 2026|in 2027|by [A-Z][a-z]+\s+\d{1,2}|through [A-Z][a-z]+\s+\d{1,2}|before [A-Z][a-z]+\s+\d{1,2})\b/i);
   return match?.[1];
+}
+
+function isWeatherLikeEvent(item: FlattenedEventMarket) {
+  const haystack = normalizeText(`${item.market.question} ${item.market.description ?? ''} ${item.event.title} ${item.event.description ?? ''}`);
+  const hasKeyword = WEATHER_DISCOVERY_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)));
+  const hasExclusion = WEATHER_EXCLUSION_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)));
+  return hasKeyword && !hasExclusion;
 }
 
 function parseResolutionSchema(item: FlattenedEventMarket): ResolutionSchema {
@@ -322,6 +337,25 @@ function parseResolutionSchema(item: FlattenedEventMarket): ResolutionSchema {
     };
   }
 
+  const tempRangeMatch = text.match(/global temperature increase by between\s+(\d+(?:\.\d+)?)\s*º?c\s+and\s+(\d+(?:\.\d+)?)\s*º?c/i)
+    ?? text.match(/between\s+(\d+(?:\.\d+)?)\s*&\s*(\d+(?:\.\d+)?)\s*(?:m\s+)?square kilometers/i)
+    ?? text.match(/between\s+(\d+(?:\.\d+)?)\s+and\s+(\d+(?:\.\d+)?)\s+(tornadoes|earthquakes|storms)/i);
+  if (tempRangeMatch) {
+    return {
+      kind: lower.includes('temperature') || lower.includes('hottest') ? 'temperatureMax' : 'unknown',
+      metric: lower.includes('sea ice') ? 'sea ice extent' : lower.includes('temperature') || lower.includes('hottest') ? 'temperature range' : 'weather range',
+      operator: 'between',
+      threshold: Number(tempRangeMatch[1]),
+      thresholdHigh: Number(tempRangeMatch[2]),
+      units: lower.includes('ºc') || lower.includes('temperature') ? '°C' : lower.includes('square kilometers') ? 'm sq km' : '',
+      location: resolvedLocation,
+      observationWindow,
+      source: 'market-rule-parser',
+      rawRule: text,
+      parseConfidence: lower.includes('sea ice') || lower.includes('temperature') ? 0.84 : 0.62,
+    };
+  }
+
   const windMatch = text.match(/([A-Z][A-Za-z .'-]+?)?.*?(wind speed|winds|gusts).*?(?:above|over|at least|greater than|reach(?:es)?)\s+(\d+(?:\.\d+)?)\s*(mph|miles per hour)/i);
   if (windMatch) {
     return {
@@ -352,6 +386,35 @@ function parseResolutionSchema(item: FlattenedEventMarket): ResolutionSchema {
     };
   }
 
+  if (/hurricane make landfall|category\s+[1-5]\s+hurricane make landfall|named storm forms/i.test(lower)) {
+    return {
+      kind: 'namedStorm',
+      metric: /landfall/.test(lower) ? 'hurricane landfall' : 'named storm occurrence',
+      operator: 'occurs',
+      location: /us|united states/.test(lower) ? 'United States' : resolvedLocation,
+      observationWindow,
+      source: 'market-rule-parser',
+      rawRule: text,
+      parseConfidence: 0.88,
+    };
+  }
+
+  if (/hottest year on record|hottest on record|global temperature increase|sea ice extent|tornadoes occur/i.test(lower)) {
+    return {
+      kind: lower.includes('temperature') || lower.includes('hottest') ? 'temperatureMax' : 'unknown',
+      metric: lower.includes('sea ice') ? 'sea ice extent' : lower.includes('tornado') ? 'tornado count' : 'global temperature anomaly',
+      operator: /less than|fewer than/.test(lower) ? 'lte' : /more than|at least|or more/.test(lower) ? 'gte' : /between/.test(lower) ? 'between' : 'unknown',
+      threshold: Number(text.match(/(\d+(?:\.\d+)?)/)?.[1] ?? NaN) || undefined,
+      thresholdHigh: Number(text.match(/between\s+\d+(?:\.\d+)?\s+(?:and|&)\s+(\d+(?:\.\d+)?)/i)?.[1] ?? NaN) || undefined,
+      units: lower.includes('ºc') ? '°C' : lower.includes('sea ice') ? 'm sq km' : '',
+      location: resolvedLocation,
+      observationWindow,
+      source: 'market-rule-parser',
+      rawRule: text,
+      parseConfidence: 0.8,
+    };
+  }
+
   if (/(rainfall|snowfall|temperature|degrees|precipitation|wind chill|wind speed|heatwave|heat index)/i.test(lower)) {
     return {
       kind: 'unknown',
@@ -378,6 +441,9 @@ function parseResolutionSchema(item: FlattenedEventMarket): ResolutionSchema {
 }
 
 function prettySchema(schema: ResolutionSchema) {
+  if (schema.operator === 'between' && schema.threshold !== undefined && schema.threshold !== null && schema.thresholdHigh !== undefined && schema.thresholdHigh !== null) {
+    return `${schema.metric} ${schema.threshold}-${schema.thresholdHigh}${schema.units ?? ''}`;
+  }
   if ((schema.operator === 'gte' || schema.operator === 'lte') && schema.threshold !== undefined && schema.threshold !== null) {
     const operator = schema.operator === 'gte' ? '≥' : '≤';
     return `${schema.metric} ${operator} ${schema.threshold}${schema.units ?? ''}`;
@@ -432,17 +498,31 @@ function eventScoringProfile(schema: ResolutionSchema): EventScoringProfile {
 
 async function getPolymarketSnapshot(): Promise<{ items: FlattenedEventMarket[]; meta: Pick<MarketFeedMeta, 'livePolymarketWeatherCount' | 'totalPolymarketMarketsScanned' | 'livePolymarketParsedCount' | 'livePolymarketParsedTitles' | 'livePolymarketEventCount'> }> {
   try {
-    const events = await fetchJson<PolymarketEvent[]>(polymarketEventsUrl);
-    const items = events.flatMap((event) => (event.markets ?? []).map((market) => ({ event, market })));
+    const [weatherTaggedEvents, generalEvents] = await Promise.all([
+      fetchJson<PolymarketEvent[]>(polymarketEventsUrl),
+      fetchJson<PolymarketEvent[]>(polymarketGeneralEventsUrl),
+    ]);
+
+    const taggedItems = weatherTaggedEvents.flatMap((event) => (event.markets ?? []).map((market) => ({ event, market })));
+    const discoveredItems = generalEvents
+      .flatMap((event) => (event.markets ?? []).map((market) => ({ event, market })))
+      .filter(isWeatherLikeEvent);
+
+    const deduped = new Map<string, FlattenedEventMarket>();
+    [...taggedItems, ...discoveredItems].forEach((item) => {
+      deduped.set(item.market.id, item);
+    });
+
+    const items = [...deduped.values()];
     const parsedItems = items.filter((item) => parseResolutionSchema(item).parseConfidence >= 0.45);
     return {
       items,
       meta: {
         livePolymarketWeatherCount: items.length,
-        totalPolymarketMarketsScanned: items.length,
+        totalPolymarketMarketsScanned: taggedItems.length + generalEvents.flatMap((event) => event.markets ?? []).length,
         livePolymarketParsedCount: parsedItems.length,
         livePolymarketParsedTitles: parsedItems.slice(0, 5).map((item) => item.market.question),
-        livePolymarketEventCount: events.length,
+        livePolymarketEventCount: new Set(items.map((item) => item.event.id)).size,
       },
     };
   } catch {
