@@ -12,6 +12,20 @@ export type PaperTradeRecord = {
   note: string;
 };
 
+export type PaperBotRunAuditEntry = {
+  runAt: string;
+  runnerId: string;
+  status: 'ok' | 'error';
+  summary: string;
+  marketCount: number;
+  actionCount: number;
+  staleMarketCount: number;
+  queuedCount: number;
+  activeCount: number;
+  nextDueAt: string | null;
+  source: 'ui' | 'backend';
+};
+
 export type PersistentPaperState = {
   version: 1;
   ownerUid: string | null;
@@ -23,6 +37,7 @@ export type PersistentPaperState = {
   paperBlotter: Record<string, PaperBlotterEntry>;
   paperOrders: Record<string, PaperOrder[]>;
   botState: PaperBotLoopState;
+  botRunHistory: PaperBotRunAuditEntry[];
   syncedAt: string;
   source: 'local' | 'firestore';
 };
@@ -89,6 +104,11 @@ function sanitizeState(input: Partial<PersistentPaperState>): PersistentPaperSta
       lastHydratedAt: input.botState?.lastHydratedAt ?? null,
       lastPersistedAt: input.botState?.lastPersistedAt ?? null,
     }),
+    botRunHistory: Array.isArray(input.botRunHistory)
+      ? input.botRunHistory
+        .filter((item): item is PaperBotRunAuditEntry => Boolean(item && typeof item === 'object' && typeof item.runAt === 'string'))
+        .slice(0, 12)
+      : [],
     syncedAt: typeof input.syncedAt === 'string' ? input.syncedAt : new Date().toISOString(),
     source: input.source === 'firestore' ? 'firestore' : 'local',
   };
@@ -106,6 +126,7 @@ export function readPersistentPaperState(): PersistentPaperState {
     paperBlotter: readJson(LOCAL_STORAGE_KEYS.paperBlotter, {}),
     paperOrders: readJson(LOCAL_STORAGE_KEYS.paperOrders, {}),
     botState: createPaperBotLoopState({ lastHydratedAt: null, lastPersistedAt: null }),
+    botRunHistory: [],
     source: 'local',
   });
 }

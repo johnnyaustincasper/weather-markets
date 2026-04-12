@@ -37,6 +37,11 @@ export function sanitizePersistentPaperState(input: Partial<PersistentPaperState
       lastHydratedAt: input?.botState?.lastHydratedAt ?? null,
       lastPersistedAt: input?.botState?.lastPersistedAt ?? null,
     }),
+    botRunHistory: Array.isArray(input?.botRunHistory)
+      ? input.botRunHistory
+        .filter((item): item is PersistentPaperState['botRunHistory'][number] => Boolean(item && typeof item === 'object' && typeof item.runAt === 'string'))
+        .slice(0, 12)
+      : [],
     syncedAt: typeof input?.syncedAt === 'string' ? input.syncedAt : new Date().toISOString(),
     source: input?.source === 'firestore' ? 'firestore' : 'local',
   };

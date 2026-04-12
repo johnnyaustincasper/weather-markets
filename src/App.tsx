@@ -32,6 +32,7 @@ import {
   loadPersistentPaperState,
   persistPaperState,
   type LedgerOwnerIdentity,
+  type PaperBotRunAuditEntry,
 } from './services/paperPersistence';
 import { createPaperBotLoopState, getPaperBotCadenceLabel, runPaperBotTick, type PaperBotLoopState } from './services/paperBotLoop';
 import { summarizePaperBotSupervision } from './services/paperBotSupervision';
@@ -255,6 +256,7 @@ function App() {
   const [paperBlotter, setPaperBlotter] = useState<Record<string, PaperBlotterEntry>>(() => getPaperBlotter());
   const [paperOrders, setPaperOrders] = useState<Record<string, PaperOrder[]>>(() => getPaperOrders());
   const [paperBotState, setPaperBotState] = useState<PaperBotLoopState>(() => createPaperBotLoopState({ lastHydratedAt: null, lastPersistedAt: null }));
+  const [paperBotRunHistory, setPaperBotRunHistory] = useState<PaperBotRunAuditEntry[]>([]);
   const [paperOrderDrafts, setPaperOrderDrafts] = useState<Record<string, { quantity: number; limitPrice: number; note: string }>>({});
   const [paperRepriceMeta, setPaperRepriceMeta] = useState<{ at: string; changedCount: number } | null>(null);
   const [selectedReviewMarketId, setSelectedReviewMarketId] = useState('');
@@ -404,6 +406,7 @@ function App() {
         setPaperBlotter(result.state.paperBlotter);
         setPaperOrders(result.state.paperOrders);
         setPaperBotState(createPaperBotLoopState(result.state.botState));
+        setPaperBotRunHistory(result.state.botRunHistory ?? []);
         setPersistenceStatus({
           mode: 'firestore',
           detail: `Hydrated your Firestore paper ledger (${getFirebaseProjectId()}/${DEFAULT_PAPER_LEDGER_ID}) for ${ledgerOwner.email ?? ledgerOwner.uid}.`,
@@ -455,6 +458,7 @@ function App() {
               lastHydratedAt: paperBotState.lastHydratedAt ?? new Date().toISOString(),
               lastPersistedAt: null,
             }),
+            botRunHistory: paperBotRunHistory,
             syncedAt: new Date().toISOString(),
             source: 'local',
           }, ledgerOwner, DEFAULT_PAPER_LEDGER_ID);
@@ -482,7 +486,7 @@ function App() {
     }, 400);
 
     return () => window.clearTimeout(timeout);
-  }, [watchIds, paperState, paperExecutionProfile, paperBlotter, paperOrders, paperBotState]);
+  }, [watchIds, paperState, paperExecutionProfile, paperBlotter, paperOrders, paperBotState, paperBotRunHistory]);
 
   const runPaperBotNow = useCallback(() => {
     if (!markets.length) return;
@@ -500,6 +504,7 @@ function App() {
         paperBlotter,
         paperOrders,
         botState: paperBotState,
+        botRunHistory: paperBotRunHistory,
         syncedAt: now,
         source: persistenceStatus.mode,
       },
@@ -508,9 +513,29 @@ function App() {
       now,
     });
 
+    const staleMarketCount = markets.filter((market) => market.freshnessMinutes >= 90 || market.quoteStatus === 'stale' || market.quoteStatus === 'empty').length;
+    const queuedCount = Object.values(result.state.paperState).filter((item) => item.state === 'queued').length;
+    const activeCount = Object.values(result.state.paperState).filter((item) => item.state === 'active').length;
+
     setPaperState(result.state.paperState);
     setPaperBotState(createPaperBotLoopState(result.state.botState));
-  }, [ledgerOwner, markets, paperBlotter, paperBotState, paperExecutionProfile, paperOrders, paperState, persistenceStatus.mode, watchIds]);
+    setPaperBotRunHistory((current) => {
+      const entry: PaperBotRunAuditEntry = {
+        runAt: now,
+        runnerId: `ui-${DEFAULT_PAPER_LEDGER_ID}`,
+        status: 'ok',
+        summary: result.summary,
+        marketCount: markets.length,
+        actionCount: result.actions.length,
+        staleMarketCount,
+        queuedCount,
+        activeCount,
+        nextDueAt: result.state.botState.nextDueAt,
+        source: 'ui',
+      };
+      return [entry, ...current].slice(0, 12);
+    });
+  }, [ledgerOwner, markets, paperBlotter, paperBotRunHistory, paperBotState, paperExecutionProfile, paperOrders, paperState, persistenceStatus.mode, watchIds]);
 
   useEffect(() => {
     if (!paperBotState.enabled || !markets.length) return;
@@ -582,6 +607,7 @@ function App() {
     .filter((item) => item.state === 'queued' || item.state === 'active' || item.consecutiveWouldTradeTicks > 0)
     .sort((left, right) => right.consecutiveWouldTradeTicks - left.consecutiveWouldTradeTicks)
     .slice(0, 5), [paperBotRuntime]);
+  const latestBotAudit = paperBotRunHistory[0] ?? null;
   const exposureSummary = useMemo(() => {
     const tracked = displayMarkets
       .map((market) => {
@@ -1068,15 +1094,33 @@ function App() {
             <ExecutionSummaryCard label="Status" value={paperBotState.status.toUpperCase()} detail={paperBotState.lastSummary ?? 'No bot tick yet.'} toneClass={paperBotState.enabled ? 'positive' : undefined} />
             <ExecutionSummaryCard label="Ticks" value={String(paperBotState.tickCount)} detail={`Cadence ${getPaperBotCadenceLabel(paperBotState.cadenceMs)}`} />
             <ExecutionSummaryCard label="Next due" value={paperBotState.nextDueAt ? formatClock(paperBotState.nextDueAt) : '--'} detail={paperBotState.nextDueAt ? formatDateTime(paperBotState.nextDueAt) : 'Bot is paused.'} />
-            <ExecutionSummaryCard label="Hot markets" value={String(paperBotHotMarkets.length)} detail="Queued, active, or building toward activation." toneClass={paperBotHotMarkets.length ? 'positive' : undefined} />
+            <ExecutionSummaryCard label="Latest audit" value={latestBotAudit ? formatClock(latestBotAudit.runAt) : '--'} detail={latestBotAudit ? `${latestBotAudit.actionCount} actions, ${latestBotAudit.staleMarketCount} stale inputs` : 'No durable run record yet.'} toneClass={latestBotAudit ? 'positive' : undefined} />
           </div>
           <div className="review-diagnostics-grid after-action-grid">
-            <ReviewListCard
-              title="Recent bot actions"
-              tone="good"
-              items={paperBotState.recentActions.map((action) => action.summary)}
-              emptyLabel="Run the bot once and its action trail will appear here."
-            />
+            <div className="intel-card">
+              <div className="source-title-row review-list-header">
+                <strong>Run audit trail</strong>
+                <span className="badge soft">{paperBotRunHistory.length} saved</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                {paperBotRunHistory.length ? paperBotRunHistory.map((run) => (
+                  <div className="stack-row review-row" key={`${run.runAt}-${run.runnerId}`}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{formatDateTime(run.runAt)}</strong>
+                        <span className={`status-pill tone-${run.status === 'ok' ? 'good' : 'bad'}`}>{run.source === 'backend' ? 'Backend tick' : 'UI tick'}</span>
+                      </div>
+                      <p>{run.summary}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>{run.actionCount} actions</small>
+                      <small>{run.staleMarketCount} stale</small>
+                      <small>{run.queuedCount} queued / {run.activeCount} active</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">Once the scheduler or operator runs a tick, the recent audit trail will land here.</p>}
+              </div>
+            </div>
             <div className="intel-card">
               <div className="source-title-row review-list-header">
                 <strong>Runtime watch</strong>
