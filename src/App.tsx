@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
-import { captureMarketHistory, getMarketHistory, getWatcherOverview, summarizeMarketTrend, type MarketHistorySnapshot, type MetricTrend } from './services/marketHistory';
+import {
+  captureMarketHistory,
+  getMarketHistory,
+  getWatcherExecutionRegimes,
+  getWatcherOverview,
+  summarizeMarketTrend,
+  type MarketHistorySnapshot,
+  type MetricTrend,
+  type WatcherExecutionRegime,
+} from './services/marketHistory';
 import type { MarketFeedMeta, QuoteStatus, WeatherMarket } from './types';
 
 const WATCH_STORAGE_KEY = 'weather-markets-watchlist';
 const REFRESH_MS = 90_000;
 const QUOTE_REFRESH_MS = 20_000;
 const MAX_ALERTS = 18;
+const REGIME_WINDOW = 6;
 
 const pct = (value: number) => `${Math.round(value * 100)}%`;
 const signedPct = (value: number) => `${value >= 0 ? '+' : ''}${Math.round(value * 100)} pts`;
@@ -26,7 +36,7 @@ const formatClock = (iso?: string) => {
 
 type MarketStatus = 'live' | 'watch' | 'stale' | 'cold';
 type AlertTone = 'good' | 'warn' | 'bad';
-type AlertKind = 'edge' | 'confidence' | 'spread' | 'freshness' | 'status' | 'quote';
+type AlertKind = 'edge' | 'confidence' | 'spread' | 'freshness' | 'status' | 'quote' | 'regime';
 
 type MarketAlert = {
   id: string;
@@ -326,19 +336,40 @@ function App() {
     return Object.fromEntries(markets.map((market) => [market.id, buildMarketAlerts(market, previousMarkets[market.id], watchSet.has(market.id))]));
   }, [markets, previousMarkets, watchSet]);
 
+  const watcherOverview = useMemo(() => getWatcherOverview(), [historyTick]);
+  const watcherExecution = useMemo(() => getWatcherExecutionRegimes(REGIME_WINDOW), [historyTick]);
+
   const allAlerts = useMemo(() => {
-    return Object.values(marketDeltas)
-      .flatMap((item) => item.alerts)
+    const regimeAlerts: MarketAlert[] = watcherExecution.regimes.slice(0, 6).map((regime) => ({
+      id: `${regime.marketId}-${regime.kind}-${regime.latestCapturedAt}`,
+      marketId: regime.marketId,
+      marketTitle: regime.title,
+      kind: 'regime',
+      tone: regime.kind === 'execution-degrading' ? 'warn' : regime.kind === 'flip-risk' ? 'bad' : 'good',
+      summary: regime.kind === 'flip-risk'
+        ? 'Execution flipping'
+        : regime.kind === 'execution-degrading'
+          ? 'Execution degrading'
+          : 'Tradability improving',
+      detail: regime.detail,
+      action: regime.kind === 'execution-degrading'
+        ? 'Keep this read-only until execution stabilizes.'
+        : regime.kind === 'flip-risk'
+          ? 'Watch another refresh before leaning on this tape.'
+          : 'Execution is improving, re-check whether the edge is still live.',
+      createdAt: regime.latestCapturedAt ?? new Date().toISOString(),
+    }));
+
+    return [...Object.values(marketDeltas).flatMap((item) => item.alerts), ...regimeAlerts]
       .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
       .slice(0, MAX_ALERTS);
-  }, [marketDeltas]);
+  }, [marketDeltas, watcherExecution]);
 
   const topEdge = useMemo(() => Math.max(...markets.map((market) => Math.abs(market.edge)), 0), [markets]);
   const avgConfidence = useMemo(() => {
     if (!markets.length) return 0;
     return markets.reduce((sum, market) => sum + market.confidence, 0) / markets.length;
   }, [markets]);
-  const watcherOverview = useMemo(() => getWatcherOverview(), [historyTick]);
   const selectedTrend = useMemo(() => selectedMarket ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
   const selectedHistory = useMemo(() => selectedMarket ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const selectedHistoryWindow = useMemo(() => selectedHistory.slice(-12), [selectedHistory]);
@@ -380,7 +411,7 @@ function App() {
         {error && <section className="panel error-panel">{error}</section>}
         {loading && <section className="panel loading-panel">Refreshing live market and weather feeds…</section>}
 
-        <section className="summary-grid">
+        <section className="summary-grid summary-grid-wide">
           <div className="panel summary-card">
             <span className="summary-label">Action queue</span>
             <strong>{actionCount} reviewable alerts</strong>
@@ -395,6 +426,11 @@ function App() {
             <span className="summary-label">Watcher memory</span>
             <strong>{watcherOverview.snapshotsStored} local snapshots stored</strong>
             <span className="subtle">{watcherOverview.risingEdgeCount} names improving edge, {watcherOverview.executionImprovingCount} seeing better execution.</span>
+          </div>
+          <div className="panel summary-card">
+            <span className="summary-label">Execution regimes</span>
+            <strong>{watcherExecution.totalFlagged} markets flagged over {watcherExecution.windowSize} snapshots</strong>
+            <span className="subtle">{watcherExecution.flipRiskCount} flipping, {watcherExecution.degradingCount} degrading, {watcherExecution.improvingCount} improving.</span>
           </div>
         </section>
 
@@ -589,6 +625,12 @@ function App() {
                       </div>
                       <div className="execution-summary-grid">
                         <ExecutionSummaryCard
+                          label="Watcher regime"
+                          value={regimeBadgeLabel(watcherExecution.regimes.find((item) => item.marketId === selectedMarket.id))}
+                          detail={watcherExecution.regimes.find((item) => item.marketId === selectedMarket.id)?.detail ?? `No watcher-level regime across the last ${watcherExecution.windowSize} snapshots.`}
+                          toneClass={regimeToneClass(watcherExecution.regimes.find((item) => item.marketId === selectedMarket.id)?.kind)}
+                        />
+                        <ExecutionSummaryCard
                           label="Quote posture"
                           value={selectedTrend.latestQuoteStatus ? selectedTrend.latestQuoteStatus.toUpperCase() : '--'}
                           detail={selectedTrend.previousQuoteStatus ? `Prev ${selectedTrend.previousQuoteStatus.toUpperCase()}` : 'Need another snapshot'}
@@ -661,6 +703,9 @@ function App() {
               </div>
               {selectedHistory.length ? (
                 <div className="history-list">
+                  {selectedMarket && watcherExecution.regimes.filter((item) => item.marketId === selectedMarket.id).map((regime) => (
+                    <WatcherRegimeRow key={`${regime.marketId}-${regime.kind}`} regime={regime} />
+                  ))}
                   {selectedHistory.slice().reverse().map((snapshot, index) => (
                     <HistoryRow key={`${snapshot.capturedAt}-${index}`} snapshot={snapshot} />
                   ))}
@@ -893,6 +938,23 @@ function Sparkline({ values, tone }: { values: Array<number | null>; tone: 'posi
   );
 }
 
+function WatcherRegimeRow({ regime }: { regime: WatcherExecutionRegime }) {
+  return (
+    <div className="history-row watcher-regime-row">
+      <div>
+        <strong>{regime.summary}</strong>
+        <p>{regime.detail}</p>
+        <div className="history-meta-row">
+          <span className={`status-chip ${regimeToneClass(regime.kind)}`}>{regimeBadgeLabel(regime)}</span>
+          <span className="status-chip tone-muted">{regime.location}</span>
+          <span className={`status-chip ${regime.latestQuoteStatus ? quoteToneClass(regime.latestQuoteStatus) : 'tone-muted'}`}>Now {regime.latestQuoteStatus ? regime.latestQuoteStatus.toUpperCase() : '--'}</span>
+        </div>
+      </div>
+      <span>{regime.latestCapturedAt ? formatClock(regime.latestCapturedAt) : '--'}</span>
+    </div>
+  );
+}
+
 function ExecutionSummaryCard({ label, value, detail, toneClass }: { label: string; value: string; detail: string; toneClass?: string }) {
   return (
     <div className="score-card execution-summary-card">
@@ -901,6 +963,20 @@ function ExecutionSummaryCard({ label, value, detail, toneClass }: { label: stri
       <p>{detail}</p>
     </div>
   );
+}
+
+function regimeBadgeLabel(regime?: WatcherExecutionRegime) {
+  if (!regime) return 'Stable';
+  if (regime.kind === 'flip-risk') return 'Flip risk';
+  if (regime.kind === 'execution-degrading') return 'Degrading';
+  return 'Improving';
+}
+
+function regimeToneClass(kind?: WatcherExecutionRegime['kind']) {
+  if (kind === 'tradability-improving') return 'tone-good';
+  if (kind === 'execution-degrading') return 'tone-warn';
+  if (kind === 'flip-risk') return 'tone-bad';
+  return 'tone-muted';
 }
 
 function statusToneClass(status: MarketStatus) {

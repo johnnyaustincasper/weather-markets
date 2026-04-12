@@ -42,6 +42,32 @@ export type MarketTrendSummary = {
   statusFlipCount: number;
 };
 
+export type WatcherExecutionRegimeKind = 'flip-risk' | 'execution-degrading' | 'tradability-improving';
+
+export type WatcherExecutionRegime = {
+  marketId: string;
+  title: string;
+  location: string;
+  kind: WatcherExecutionRegimeKind;
+  summary: string;
+  detail: string;
+  signalCount: number;
+  score: number;
+  latestQuoteStatus: QuoteStatus | null;
+  previousQuoteStatus: QuoteStatus | null;
+  latestCapturedAt: string | null;
+};
+
+export type WatcherExecutionRegimeOverview = {
+  windowSize: number;
+  totalFlagged: number;
+  flipRiskCount: number;
+  degradingCount: number;
+  improvingCount: number;
+  latestCapturedAt: string | null;
+  regimes: WatcherExecutionRegime[];
+};
+
 export type WatcherOverview = {
   trackedMarketCount: number;
   snapshotsStored: number;
@@ -56,6 +82,7 @@ const STORAGE_KEY = 'weather-market-history:v1';
 const MAX_SNAPSHOTS_PER_MARKET = 36;
 const MAX_MARKET_RECORDS = 80;
 const MAX_AGE_MS = 1000 * 60 * 60 * 24 * 14;
+const DEFAULT_REGIME_WINDOW = 6;
 
 function hasLocalStorage() {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined';
@@ -94,6 +121,15 @@ function quoteStatusScore(status: QuoteStatus) {
   return 0;
 }
 
+function quoteStatusRank(status: QuoteStatus | null) {
+  if (status === 'tight') return 4;
+  if (status === 'tradable') return 3;
+  if (status === 'wide') return 2;
+  if (status === 'stale') return 1;
+  if (status === 'empty') return 0;
+  return -1;
+}
+
 function toSnapshot(market: WeatherMarket, capturedAt: string): MarketHistorySnapshot {
   return {
     capturedAt,
@@ -119,6 +155,105 @@ function shouldAppendSnapshot(previous: MarketHistorySnapshot | undefined, next:
     || previous.quoteStatus !== next.quoteStatus
     || previous.quoteQualityScore !== next.quoteQualityScore
     || previous.capturedAt !== next.capturedAt;
+}
+
+function buildTrend(current: number | null, previous: number | null): MetricTrend {
+  if (current === null || previous === null) {
+    return { current, previous, delta: null, direction: 'unknown' };
+  }
+
+  const delta = current - previous;
+  return {
+    current,
+    previous,
+    delta,
+    direction: delta === 0 ? 'flat' : delta > 0 ? 'up' : 'down',
+  };
+}
+
+function countStatusFlips(snapshots: MarketHistorySnapshot[]) {
+  let flipCount = 0;
+  for (let index = 1; index < snapshots.length; index += 1) {
+    if (snapshots[index - 1]?.quoteStatus !== snapshots[index]?.quoteStatus) flipCount += 1;
+  }
+  return flipCount;
+}
+
+function isMonotonic(values: number[], direction: 'up' | 'down') {
+  if (values.length < 3) return false;
+  return values.every((value, index) => index === 0 || (direction === 'up' ? value >= values[index - 1] : value <= values[index - 1]));
+}
+
+function formatStatus(status: QuoteStatus | null) {
+  return status ? status.toUpperCase() : '--';
+}
+
+function summarizeExecutionRegime(record: MarketHistoryRecord, windowSize: number): WatcherExecutionRegime[] {
+  const window = record.snapshots.slice(-windowSize);
+  if (window.length < 3) return [];
+
+  const latest = window[window.length - 1] ?? null;
+  const previous = window[window.length - 2] ?? null;
+  const quoteQuality = window.map((snapshot) => snapshot.quoteQualityScore);
+  const spreadValues = window.map((snapshot) => snapshot.spread).filter((value): value is number => value !== null);
+  const statusFlips = countStatusFlips(window);
+  const latestStatus = latest?.quoteStatus ?? null;
+  const previousStatus = previous?.quoteStatus ?? null;
+  const statusRankDelta = quoteStatusRank(latestStatus) - quoteStatusRank(window[0]?.quoteStatus ?? null);
+  const qualityDelta = (latest?.quoteQualityScore ?? 0) - (window[0]?.quoteQualityScore ?? 0);
+  const freshnessDelta = (latest?.freshnessMinutes ?? 0) - (window[0]?.freshnessMinutes ?? 0);
+  const spreadDelta = spreadValues.length >= 2 ? spreadValues[spreadValues.length - 1] - spreadValues[0] : 0;
+  const regimes: WatcherExecutionRegime[] = [];
+
+  if (statusFlips >= 2) {
+    regimes.push({
+      marketId: record.marketId,
+      title: record.title,
+      location: record.location,
+      kind: 'flip-risk',
+      summary: `${record.title} keeps flipping quote posture`,
+      detail: `${statusFlips} quote-status flips over the last ${window.length} local snapshots, now ${formatStatus(latestStatus)} after ${formatStatus(previousStatus)}.`,
+      signalCount: statusFlips,
+      score: statusFlips + Math.abs(statusRankDelta) + Math.abs(qualityDelta),
+      latestQuoteStatus: latestStatus,
+      previousQuoteStatus: previousStatus,
+      latestCapturedAt: latest?.capturedAt ?? null,
+    });
+  }
+
+  if (qualityDelta < -0.18 && isMonotonic(quoteQuality, 'down') && freshnessDelta >= 0) {
+    regimes.push({
+      marketId: record.marketId,
+      title: record.title,
+      location: record.location,
+      kind: 'execution-degrading',
+      summary: `${record.title} is steadily losing execution quality`,
+      detail: `Quote quality slid ${Math.round(Math.abs(qualityDelta) * 100)} pts over ${window.length} snapshots, freshness worsened by ${Math.round(freshnessDelta)}m${spreadValues.length >= 2 ? `, spread moved ${spreadDelta >= 0 ? '+' : ''}${Math.round(spreadDelta * 100)} pts` : ''}.`,
+      signalCount: window.length,
+      score: Math.abs(qualityDelta) * 10 + Math.max(freshnessDelta, 0) / 30 + Math.max(spreadDelta, 0) * 5,
+      latestQuoteStatus: latestStatus,
+      previousQuoteStatus: previousStatus,
+      latestCapturedAt: latest?.capturedAt ?? null,
+    });
+  }
+
+  if (qualityDelta > 0.18 && isMonotonic(quoteQuality, 'up') && statusRankDelta > 0) {
+    regimes.push({
+      marketId: record.marketId,
+      title: record.title,
+      location: record.location,
+      kind: 'tradability-improving',
+      summary: `${record.title} is becoming easier to trade`,
+      detail: `Quote quality improved ${Math.round(qualityDelta * 100)} pts over ${window.length} snapshots and quote status climbed from ${formatStatus(window[0]?.quoteStatus ?? null)} to ${formatStatus(latestStatus)}${spreadValues.length >= 2 ? ` with spread ${spreadDelta < 0 ? 'tightening' : 'holding roughly flat'}` : ''}.`,
+      signalCount: window.length,
+      score: qualityDelta * 10 + statusRankDelta + Math.max(-spreadDelta, 0) * 5,
+      latestQuoteStatus: latestStatus,
+      previousQuoteStatus: previousStatus,
+      latestCapturedAt: latest?.capturedAt ?? null,
+    });
+  }
+
+  return regimes;
 }
 
 export function captureMarketHistory(markets: WeatherMarket[], capturedAt: string) {
@@ -156,30 +291,11 @@ export function getMarketHistory(marketId: string): MarketHistoryRecord | null {
   return store[marketId] ?? null;
 }
 
-function buildTrend(current: number | null, previous: number | null): MetricTrend {
-  if (current === null || previous === null) {
-    return { current, previous, delta: null, direction: 'unknown' };
-  }
-
-  const delta = current - previous;
-  return {
-    current,
-    previous,
-    delta,
-    direction: delta === 0 ? 'flat' : delta > 0 ? 'up' : 'down',
-  };
-}
-
 export function summarizeMarketTrend(marketId: string): MarketTrendSummary {
   const history = getMarketHistory(marketId);
   const snapshots = history?.snapshots ?? [];
   const latest = snapshots[snapshots.length - 1] ?? null;
   const previous = snapshots[snapshots.length - 2] ?? null;
-
-  let statusFlipCount = 0;
-  for (let index = 1; index < snapshots.length; index += 1) {
-    if (snapshots[index - 1]?.quoteStatus !== snapshots[index]?.quoteStatus) statusFlipCount += 1;
-  }
 
   return {
     impliedProbability: buildTrend(latest?.impliedProbability ?? null, previous?.impliedProbability ?? null),
@@ -193,7 +309,29 @@ export function summarizeMarketTrend(marketId: string): MarketTrendSummary {
     snapshotCount: snapshots.length,
     latestQuoteStatus: latest?.quoteStatus ?? null,
     previousQuoteStatus: previous?.quoteStatus ?? null,
-    statusFlipCount,
+    statusFlipCount: countStatusFlips(snapshots),
+  };
+}
+
+export function getWatcherExecutionRegimes(windowSize = DEFAULT_REGIME_WINDOW): WatcherExecutionRegimeOverview {
+  const records = Object.values(readStore());
+  const regimes = records
+    .flatMap((record) => summarizeExecutionRegime(record, windowSize))
+    .sort((left, right) => right.score - left.score || (right.latestCapturedAt ?? '').localeCompare(left.latestCapturedAt ?? ''));
+
+  const latestCapturedAt = regimes[0]?.latestCapturedAt ?? null;
+  const flipRiskCount = regimes.filter((regime) => regime.kind === 'flip-risk').length;
+  const degradingCount = regimes.filter((regime) => regime.kind === 'execution-degrading').length;
+  const improvingCount = regimes.filter((regime) => regime.kind === 'tradability-improving').length;
+
+  return {
+    windowSize,
+    totalFlagged: regimes.length,
+    flipRiskCount,
+    degradingCount,
+    improvingCount,
+    latestCapturedAt,
+    regimes,
   };
 }
 

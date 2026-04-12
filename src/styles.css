@@ -436,6 +436,11 @@ tbody tr:hover,
   align-items: start;
 }
 
+.watcher-regime-row {
+  border: 1px solid rgba(125, 211, 252, 0.12);
+  background: linear-gradient(180deg, rgba(125, 211, 252, 0.08), rgba(255, 255, 255, 0.03));
+}
+
 .history-row p {
   margin: 6px 0 0;
   color: var(--muted);
