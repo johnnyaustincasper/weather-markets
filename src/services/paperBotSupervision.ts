@@ -1,6 +1,8 @@
 import type { PaperOrder } from './paperOrders.js';
+import type { PaperBlotterEntry } from './paperBlotter.js';
 import type { PaperTradeRecord } from './paperPersistence.js';
 import { getPaperBotCadenceLabel, type PaperBotLoopState } from './paperBotLoop.js';
+import { summarizePaperRiskGovernor } from './paperRiskGovernor.js';
 import type { WeatherMarket } from '../types.js';
 
 export type SupervisionTone = 'good' | 'warn' | 'bad' | 'muted';
@@ -37,10 +39,11 @@ export function summarizePaperBotSupervision(params: {
   botState: PaperBotLoopState;
   markets: WeatherMarket[];
   paperState: Record<string, PaperTradeRecord>;
+  paperBlotter: Record<string, PaperBlotterEntry>;
   paperOrders: Record<string, PaperOrder[]>;
   now?: string;
 }): PaperBotSupervisionSummary {
-  const { botState, markets, paperState, paperOrders, now = new Date().toISOString() } = params;
+  const { botState, markets, paperState, paperBlotter, paperOrders, now = new Date().toISOString() } = params;
   const activeMarkets = Object.values(paperState).filter((item) => item.state === 'active').length;
   const queuedMarkets = Object.values(paperState).filter((item) => item.state === 'queued').length;
   const workingOrders = Object.values(paperOrders).flat().filter((order) => order.status === 'working' || order.status === 'partial').length;
@@ -49,6 +52,15 @@ export function summarizePaperBotSupervision(params: {
   const lastCompletedMinutes = minutesBetween(botState.lastTickCompletedAt, now);
   const leaseExpired = Boolean(botState.lease.expiresAt) && new Date(botState.lease.expiresAt as string).getTime() <= new Date(now).getTime();
   const cadenceLabel = getPaperBotCadenceLabel(botState.cadenceMs);
+  const risk = summarizePaperRiskGovernor({
+    settings: botState.riskGovernor,
+    startingCash: 1000,
+    blotter: paperBlotter,
+    orders: paperOrders,
+    paperState,
+    markets,
+    now,
+  });
   const alerts: BotSupervisionAlert[] = [];
 
   if (!botState.enabled) {
@@ -107,6 +119,20 @@ export function summarizePaperBotSupervision(params: {
     });
   }
 
+  if (risk.halted) {
+    alerts.push({
+      title: 'Risk governor halted new risk',
+      detail: risk.detail,
+      tone: 'bad',
+    });
+  } else if (risk.safeMode) {
+    alerts.push({
+      title: 'Risk governor safe mode',
+      detail: risk.detail,
+      tone: 'warn',
+    });
+  }
+
   const checks: BotSupervisionCheck[] = [
     {
       label: 'Cadence',
@@ -131,6 +157,12 @@ export function summarizePaperBotSupervision(params: {
       status: `${Math.max(0, markets.length - staleMarkets)}/${markets.length || 0} usable`,
       detail: staleMarkets ? `${staleMarkets} markets are stale, empty, or aging.` : 'Quotes and weather inputs currently look fresh enough for supervision.',
       tone: staleMarkets >= Math.max(2, Math.ceil(markets.length / 2)) ? 'bad' : staleMarkets > 0 ? 'warn' : 'good',
+    },
+    {
+      label: 'Risk governor',
+      status: risk.halted ? 'HALTED' : risk.safeMode ? 'SAFE MODE' : 'OPEN',
+      detail: risk.detail,
+      tone: risk.halted ? 'bad' : risk.safeMode ? 'warn' : 'good',
     },
   ];
 

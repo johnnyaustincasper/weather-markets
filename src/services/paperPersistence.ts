@@ -3,6 +3,7 @@ import { getFirestoreDb, getFirebaseProjectId, isFirebaseConfigured } from '../l
 import type { PaperBlotterEntry } from './paperBlotter.js';
 import { createPaperBotLoopState, type PaperBotLoopState } from './paperBotLoop.js';
 import { DEFAULT_PAPER_EXECUTION_SETTINGS, sanitizePaperExecutionSettings, type PaperExecutionProfile } from './paperExecutionSettings.js';
+import { DEFAULT_PAPER_RISK_GOVERNOR_SETTINGS } from './paperRiskGovernor.js';
 import type { PaperOrder } from './paperOrders.js';
 import type { PaperPositionState } from './paperTrading.js';
 
@@ -103,6 +104,7 @@ function sanitizeState(input: Partial<PersistentPaperState>): PersistentPaperSta
       ...input.botState,
       lastHydratedAt: input.botState?.lastHydratedAt ?? null,
       lastPersistedAt: input.botState?.lastPersistedAt ?? null,
+      riskGovernor: input.botState?.riskGovernor ?? DEFAULT_PAPER_RISK_GOVERNOR_SETTINGS,
     }),
     botRunHistory: Array.isArray(input.botRunHistory)
       ? input.botRunHistory
@@ -145,6 +147,27 @@ export function isFirestorePersistenceEnabled() {
 
 export function buildOwnerLedgerDocumentId(ledgerId: string, ownerUid: string) {
   return `${ownerUid}__${ledgerId}`;
+}
+
+export type LedgerIdentityDescriptor = {
+  ownerUid: string;
+  ledgerId: string;
+  documentId: string;
+  collectionName: string;
+  documentPath: string;
+};
+
+export function describeOwnerLedgerIdentity(ownerUid: string, ledgerId = DEFAULT_PAPER_LEDGER_ID): LedgerIdentityDescriptor {
+  const normalizedOwnerUid = ownerUid.trim();
+  const normalizedLedgerId = ledgerId.trim() || DEFAULT_PAPER_LEDGER_ID;
+  const documentId = buildOwnerLedgerDocumentId(normalizedLedgerId, normalizedOwnerUid);
+  return {
+    ownerUid: normalizedOwnerUid,
+    ledgerId: normalizedLedgerId,
+    documentId,
+    collectionName: COLLECTION_NAME,
+    documentPath: `${COLLECTION_NAME}/${documentId}`,
+  };
 }
 
 export async function loadPersistentPaperState(owner: LedgerOwnerIdentity, ledgerId = DEFAULT_PAPER_LEDGER_ID) {

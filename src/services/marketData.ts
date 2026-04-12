@@ -157,6 +157,9 @@ const WEATHER_SETTLEMENT_CUES = [
 const AMBIGUOUS_WEATHER_TOPIC_TERMS = [
   'weather this summer', 'weather this year', 'climate change', 'weather event', 'storm season', 'hot summer', 'cold winter',
 ];
+const LONG_RANGE_OR_TOPIC_ONLY_TERMS = [
+  'this summer', 'this winter', 'this season', 'storm season', 'hurricane season', 'this year', 'in 2026', 'in 2027',
+];
 const now = () => new Date();
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 const fmtPct = (value: number) => `${Math.round(value * 100)}%`;
@@ -198,12 +201,15 @@ const locationCatalog: LocationGuess[] = [
   { label: 'Portland', latitude: 45.5152, longitude: -122.6784, aliases: ['portland'], specificity: 'city' },
 ];
 
+const FETCH_TIMEOUT_MS = 12_000;
+
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url, {
     headers: {
       Accept: 'application/json',
       'User-Agent': userAgent,
     },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
 
   if (!response.ok) throw new Error(`Request failed: ${response.status} ${response.statusText}`);
@@ -375,9 +381,17 @@ function assessWeatherDiscovery(item: FlattenedEventMarket): WeatherDiscoveryAss
     ambiguityPenalty += 1.4;
     reasons.push('topic-only weather wording');
   }
+  if (LONG_RANGE_OR_TOPIC_ONLY_TERMS.some((keyword) => haystack.includes(normalizeText(keyword))) && !measurableRule && !namedStormRule) {
+    ambiguityPenalty += 1.5;
+    reasons.push('long-range topic wording');
+  }
   if (WEATHER_DISCOVERY_KEYWORDS.some((keyword) => titleOnly.includes(normalizeText(keyword))) && !measurableRule && !namedStormRule && schema.parseConfidence < 0.58) {
     ambiguityPenalty += 1.7;
     reasons.push('weak weather linkage');
+  }
+  if (schema.kind === 'unknown' && schema.operator === 'unknown' && !hasLocation) {
+    ambiguityPenalty += 1.6;
+    reasons.push('generic unlocated contract');
   }
 
   if (HARD_WEATHER_EXCLUSION_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)))) {
@@ -719,7 +733,10 @@ function liveMatchConfidenceFrom(discovery: WeatherDiscoveryAssessment, schema: 
   const ambiguityPenalty = clamp(discovery.ambiguityPenalty / 5, 0, 0.22);
   const quoteBoost = quote && quoteStatusFrom(quote) !== 'empty' ? 0.04 : 0;
   const liquidityBoost = market && liquidityNumber(market) >= 5_000 ? 0.03 : market && liquidityNumber(market) <= 250 ? -0.03 : 0;
-  return clamp(0.18 + discovery.score / 9 + schema.parseConfidence * 0.42 + parseQualityBoost(schema) + locationBoost + matchStrengthBoost + quoteBoost + liquidityBoost - ambiguityPenalty, 0.08, 0.995);
+  const structuralPenalty = schema.kind === 'unknown'
+    ? 0.14
+    : (!canonicalLocation && schema.kind !== 'namedStorm' ? 0.06 : 0);
+  return clamp(0.18 + discovery.score / 9 + schema.parseConfidence * 0.42 + parseQualityBoost(schema) + locationBoost + matchStrengthBoost + quoteBoost + liquidityBoost - ambiguityPenalty - structuralPenalty, 0.08, 0.995);
 }
 
 async function getPolymarketSnapshot(): Promise<{ items: FlattenedEventMarket[]; meta: Pick<MarketFeedMeta, 'livePolymarketWeatherCount' | 'totalPolymarketMarketsScanned' | 'livePolymarketParsedCount' | 'livePolymarketParsedTitles' | 'livePolymarketEventCount'> }> {
@@ -1141,16 +1158,38 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
   };
 }
 
+function isTrustworthyLiveMarket(market: WeatherMarket) {
+  const parseThreshold = market.resolutionSchema.kind === 'namedStorm'
+    ? 0.58
+    : market.resolutionSchema.kind === 'unknown'
+      ? 0.84
+      : 0.68;
+  const confidenceThreshold = market.resolutionSchema.kind === 'unknown' ? 0.52 : 0.44;
+  const liquidityValue = Number.parseFloat(market.liquidity.replace(/[^\d.]/g, '')) || 0;
+  const hasUsableQuote = market.quoteStatus !== 'empty' || market.event?.liquidity === 0 || market.event?.liquidity === undefined || (market.event?.liquidity ?? 0) >= 2_500;
+  const forecastUnsupported = market.notes.includes('well beyond the 3-day forecast window used by the model');
+  const nearLimitTiming = /near its limit/i.test(market.heuristicSummary) || /\bnear-limit\b/i.test(market.heuristicDetails.thresholdLabel);
+  const staleInputs = market.freshnessMinutes > 150;
+  const thinLiquidity = liquidityValue < 500 && (market.event?.liquidity ?? 0) < 500;
+
+  if (market.resolutionSchema.kind === 'unknown') return false;
+  if (forecastUnsupported && market.resolutionSchema.kind !== 'namedStorm') return false;
+  if (market.discovery.parseConfidence < parseThreshold) return false;
+  if (market.confidence < confidenceThreshold) return false;
+  if (!hasUsableQuote) return false;
+  if (thinLiquidity && Math.abs(market.edge) < 0.1) return false;
+  if (staleInputs && market.confidence < 0.72) return false;
+  if (nearLimitTiming && Math.abs(market.edge) < 0.12) return false;
+  if (market.resolutionSchema.kind === 'namedStorm' && market.disagreement > 0.16) return false;
+  return true;
+}
+
 export async function getWeatherMarkets(): Promise<WeatherMarketResponse> {
   const polymarket = await getPolymarketSnapshot();
   const markets = await Promise.all(polymarket.items.map((item) => normalizeEventMarket(item)));
   markets.sort((a, b) => Math.abs(b.edge) * b.confidence - Math.abs(a.edge) * a.confidence);
 
-  const qualifiedMarkets = markets.filter((market) => {
-    if (market.resolutionSchema.kind === 'namedStorm' || market.resolutionSchema.kind === 'unknown') return true;
-    return !market.notes.includes('well beyond the 3-day forecast window used by the model');
-  });
- 
+  const qualifiedMarkets = markets.filter((market) => isTrustworthyLiveMarket(market));
 
   return {
     markets: qualifiedMarkets,

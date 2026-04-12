@@ -76,6 +76,39 @@ export type PaperPerformanceSummary = {
   totals: PaperPerformanceBucket;
   bySetupType: PaperPerformanceBucket[];
   byEdgeBucket: PaperPerformanceBucket[];
+  byDirection: PaperPerformanceBucket[];
+  byConfidenceBucket: PaperPerformanceBucket[];
+  expectancyDrift: {
+    recentWindow: number;
+    baselineWindow: number;
+    recent: {
+      sampleSize: number;
+      wins: number;
+      losses: number;
+      flats: number;
+      expectancyPerTrade: number | null;
+      winRate: number | null;
+      totalRealizedPnl: number;
+    };
+    baseline: {
+      sampleSize: number;
+      wins: number;
+      losses: number;
+      flats: number;
+      expectancyPerTrade: number | null;
+      winRate: number | null;
+      totalRealizedPnl: number;
+    };
+    driftPerTrade: number | null;
+    driftDirection: 'improving' | 'deteriorating' | 'flat' | 'insufficient';
+    severity: 'good' | 'warn' | 'bad' | 'muted';
+    headline: string;
+    detail: string;
+  };
+  setupFamilyHeat: {
+    leaders: (PaperPerformanceBucket & { expectancyPerTrade: number | null; trendLabel: string })[];
+    laggards: (PaperPerformanceBucket & { expectancyPerTrade: number | null; trendLabel: string })[];
+  };
   fastValidation: {
     closedCount: number;
     expectancyPerTrade: number | null;
@@ -89,10 +122,29 @@ export type PaperPerformanceSummary = {
       avgRealizedPnl: number | null;
       streak: { direction: 'win' | 'loss' | 'flat' | 'mixed'; count: number };
     };
+    scorecard: {
+      avgWin: number | null;
+      avgLoss: number | null;
+      payoffRatio: number | null;
+      profitFactor: number | null;
+      qualityLabel: string;
+    };
     failureClusters: {
       key: string;
       label: string;
       count: number;
+      avgRealizedPnl: number | null;
+      totalRealizedPnl: number;
+      detail: string;
+    }[];
+    loserPatternClusters: {
+      key: string;
+      label: string;
+      count: number;
+      setups: string[];
+      directions: PaperTradePlan['direction'][];
+      avgEntryEdge: number | null;
+      avgConfidenceDrop: number | null;
       avgRealizedPnl: number | null;
       totalRealizedPnl: number;
       detail: string;
@@ -103,6 +155,23 @@ export type PaperPerformanceSummary = {
     weakestSetup: PaperPerformanceBucket | null;
     strongestEdgeBucket: PaperPerformanceBucket | null;
     weakestEdgeBucket: PaperPerformanceBucket | null;
+    bestDirection: PaperPerformanceBucket | null;
+    weakestDirection: PaperPerformanceBucket | null;
+    strongestConfidenceBucket: PaperPerformanceBucket | null;
+    weakestConfidenceBucket: PaperPerformanceBucket | null;
+    setupKillSuggestions: {
+      key: string;
+      setupType: string;
+      label: string;
+      severity: 'downgrade' | 'disable';
+      tradeCount: number;
+      lossCount: number;
+      winRate: number | null;
+      totalRealizedPnl: number;
+      sampleNote: string;
+      rationale: string;
+      action: string;
+    }[];
     patterns: { title: string; detail: string; tone: 'good' | 'warn' | 'bad' }[];
     lessons: string[];
   };
@@ -289,6 +358,18 @@ function edgeBucketKeyFor(entryEdge: number) {
   return { key: 'edge-sub-6', label: 'Under 6 pt edge' };
 }
 
+function confidenceBucketKeyFor(entryConfidence: number) {
+  if (entryConfidence >= 0.75) return { key: 'confidence-75-plus', label: '75%+ confidence' };
+  if (entryConfidence >= 0.65) return { key: 'confidence-65-74', label: '65% to 74%' };
+  return { key: 'confidence-sub-65', label: 'Under 65%' };
+}
+
+function directionBucketFor(direction: PaperTradePlan['direction']) {
+  if (direction === 'buy-yes') return { key: 'buy-yes', label: 'Buy YES' };
+  if (direction === 'buy-no') return { key: 'buy-no', label: 'Buy NO' };
+  return { key: 'stand-aside', label: 'Stand aside' };
+}
+
 function pickBestBucket(buckets: PaperPerformanceBucket[]) {
   return buckets
     .filter((bucket) => bucket.closed > 0)
@@ -359,7 +440,7 @@ function buildPatterns(entries: PaperBlotterEntry[], totals: PaperPerformanceBuc
   return patterns.slice(0, 4);
 }
 
-function buildLessons(totals: PaperPerformanceBucket, bySetupType: PaperPerformanceBucket[], byEdgeBucket: PaperPerformanceBucket[]) {
+function buildLessons(totals: PaperPerformanceBucket, bySetupType: PaperPerformanceBucket[], byEdgeBucket: PaperPerformanceBucket[], byDirection: PaperPerformanceBucket[], byConfidenceBucket: PaperPerformanceBucket[]) {
   const lessons: string[] = [];
   const bestSetup = pickBestBucket(bySetupType);
   const weakestSetup = pickWorstBucket(bySetupType);
@@ -378,6 +459,23 @@ function buildLessons(totals: PaperPerformanceBucket, bySetupType: PaperPerforma
   if (weakestEdgeBucket && weakestEdgeBucket.totalRealizedPnl < 0) {
     lessons.push(`${weakestEdgeBucket.label} is underperforming, tighten entry standards or downsize that bucket.`);
   }
+  const bestDirection = pickBestBucket(byDirection);
+  const weakestDirection = pickWorstBucket(byDirection);
+  const strongestConfidenceBucket = pickBestBucket(byConfidenceBucket);
+  const weakestConfidenceBucket = pickWorstBucket(byConfidenceBucket);
+
+  if (bestDirection && bestDirection.totalRealizedPnl > 0) {
+    lessons.push(`${bestDirection.label} is the cleaner side right now, so let the weaker side earn risk back before sizing it equally.`);
+  }
+  if (strongestConfidenceBucket && strongestConfidenceBucket.totalRealizedPnl > 0) {
+    lessons.push(`${strongestConfidenceBucket.label} entries are validating best, so demand more proof before taking lower-confidence trades.`);
+  }
+  if (weakestDirection && weakestDirection.totalRealizedPnl < 0) {
+    lessons.push(`${weakestDirection.label} is bleeding expectancy, so tighten those entries or reduce frequency on that side.`);
+  }
+  if (weakestConfidenceBucket && weakestConfidenceBucket.totalRealizedPnl < 0) {
+    lessons.push(`${weakestConfidenceBucket.label} is underperforming, which is a good sign to wait for cleaner confirmation before deploying.`);
+  }
   if (!lessons.length && totals.total > 0) {
     lessons.push('Keep collecting closes. The review layer is live, but there is not enough dispersion yet to promote a hard lesson.');
   }
@@ -387,6 +485,102 @@ function buildLessons(totals: PaperPerformanceBucket, bySetupType: PaperPerforma
 
 function round4(value: number) {
   return Number(value.toFixed(4));
+}
+
+function buildExpectancySlice(entries: PaperBlotterEntry[]) {
+  const closed = entries.filter((entry) => entry.state === 'closed');
+  const realized = closed.map((entry) => entry.realizedPnlPoints ?? 0);
+  const wins = closed.filter((entry) => entry.outcome === 'win').length;
+  const losses = closed.filter((entry) => entry.outcome === 'loss').length;
+  const flats = closed.filter((entry) => entry.outcome === 'flat').length;
+  return {
+    sampleSize: closed.length,
+    wins,
+    losses,
+    flats,
+    expectancyPerTrade: closed.length ? round4(realized.reduce((sum, value) => sum + value, 0) / closed.length) : null,
+    winRate: closed.length ? wins / closed.length : null,
+    totalRealizedPnl: round4(realized.reduce((sum, value) => sum + value, 0)),
+  };
+}
+
+function buildExpectancyDrift(entries: PaperBlotterEntry[]) {
+  const closed = entries
+    .filter((entry) => entry.state === 'closed')
+    .sort((left, right) => new Date(right.closedAt ?? 0).getTime() - new Date(left.closedAt ?? 0).getTime());
+  const recentWindow = Math.min(5, closed.length);
+  const baselineWindow = Math.min(12, closed.length);
+  const recent = buildExpectancySlice(closed.slice(0, recentWindow));
+  const baseline = buildExpectancySlice(closed.slice(0, baselineWindow));
+  const driftPerTrade = recent.expectancyPerTrade !== null && baseline.expectancyPerTrade !== null
+    ? round4(recent.expectancyPerTrade - baseline.expectancyPerTrade)
+    : null;
+
+  if (closed.length < 3 || driftPerTrade === null) {
+    return {
+      recentWindow,
+      baselineWindow,
+      recent,
+      baseline,
+      driftPerTrade: null,
+      driftDirection: 'insufficient' as const,
+      severity: 'muted' as const,
+      headline: 'Need more closed trades for drift review',
+      detail: 'Expectancy drift becomes useful after a few closes have accumulated.',
+    };
+  }
+
+  if (driftPerTrade >= 0.02) {
+    return {
+      recentWindow,
+      baselineWindow,
+      recent,
+      baseline,
+      driftPerTrade,
+      driftDirection: 'improving' as const,
+      severity: 'good' as const,
+      headline: 'Recent expectancy is improving',
+      detail: `Last ${recent.sampleSize} closes are running ${Math.round(driftPerTrade * 100)} pts/trade better than the broader ${baseline.sampleSize}-trade baseline.`,
+    };
+  }
+
+  if (driftPerTrade <= -0.02) {
+    return {
+      recentWindow,
+      baselineWindow,
+      recent,
+      baseline,
+      driftPerTrade,
+      driftDirection: 'deteriorating' as const,
+      severity: 'bad' as const,
+      headline: 'Expectancy drift is deteriorating',
+      detail: `Last ${recent.sampleSize} closes are running ${Math.abs(Math.round(driftPerTrade * 100))} pts/trade worse than the broader ${baseline.sampleSize}-trade baseline.`,
+    };
+  }
+
+  return {
+    recentWindow,
+    baselineWindow,
+    recent,
+    baseline,
+    driftPerTrade,
+    driftDirection: 'flat' as const,
+    severity: 'warn' as const,
+    headline: 'Expectancy is roughly flat versus baseline',
+    detail: `Recent tape is within ${Math.abs(Math.round(driftPerTrade * 100))} pts/trade of the ${baseline.sampleSize}-trade baseline, so keep monitoring for a cleaner break.`,
+  };
+}
+
+function bucketExpectancy(bucket: PaperPerformanceBucket) {
+  return bucket.closed ? round4(bucket.totalRealizedPnl / bucket.closed) : null;
+}
+
+function setupTrendLabel(bucket: PaperPerformanceBucket) {
+  const expectancy = bucketExpectancy(bucket);
+  if (bucket.closed < 2 || expectancy === null) return 'Thin sample';
+  if (expectancy >= 0.02) return 'Press this family';
+  if (expectancy <= -0.02) return 'Cut this family';
+  return 'Mixed family';
 }
 
 function buildRecentForm(entries: PaperBlotterEntry[]) {
@@ -464,6 +658,87 @@ function buildFailureClusters(entries: PaperBlotterEntry[]) {
     }))
     .sort((left, right) => right.count - left.count || left.totalRealizedPnl - right.totalRealizedPnl)
     .slice(0, 4);
+}
+
+function buildLoserPatternClusters(entries: PaperBlotterEntry[]) {
+  const closedLosers = entries.filter((entry) => entry.state === 'closed' && entry.outcome === 'loss');
+  const clusterSpecs = [
+    {
+      key: 'setup-thin-edge-confidence-fade',
+      label: 'Thin edge, then confidence faded',
+      detail: 'Losses that started with a modest edge and later lost forecast support.',
+      match: (entry: PaperBlotterEntry) => Math.abs(entry.entryEdge) < 0.08 && entry.currentConfidence <= entry.entryConfidence - 0.05,
+    },
+    {
+      key: 'setup-edge-collapse-stop',
+      label: 'Edge collapsed into stop',
+      detail: 'Losses where the original gap compressed quickly and the exit engine already wanted out.',
+      match: (entry: PaperBlotterEntry) => entry.currentEdge <= entry.entryEdge - 0.03 && entry.exitSuggestion.reason === 'stop-loss',
+    },
+    {
+      key: 'setup-high-confidence-false-positive',
+      label: 'High-confidence false positives',
+      detail: 'Losses that looked strong on entry but still failed, a sign the family may be over-trusted.',
+      match: (entry: PaperBlotterEntry) => entry.entryConfidence >= 0.72 && (entry.realizedPnlPoints ?? 0) <= -0.03,
+    },
+    {
+      key: 'setup-low-edge-stop',
+      label: 'Low edge stop-outs',
+      detail: 'Losses taken from weak starting asymmetry that still consumed stop budget.',
+      match: (entry: PaperBlotterEntry) => Math.abs(entry.entryEdge) < 0.06 && entry.exitSuggestion.reason === 'stop-loss',
+    },
+  ];
+
+  return clusterSpecs
+    .map((cluster) => {
+      const items = closedLosers.filter(cluster.match);
+      const confidenceDrops = items.map((entry) => entry.currentConfidence - entry.entryConfidence);
+      const avg = (values: number[]) => values.length ? round4(values.reduce((sum, value) => sum + value, 0) / values.length) : null;
+      return {
+        key: cluster.key,
+        label: cluster.label,
+        count: items.length,
+        setups: Array.from(new Set(items.map((entry) => entry.setupType))),
+        directions: Array.from(new Set(items.map((entry) => entry.direction))),
+        avgEntryEdge: avg(items.map((entry) => Math.abs(entry.entryEdge))),
+        avgConfidenceDrop: avg(confidenceDrops),
+        avgRealizedPnl: avg(items.map((entry) => entry.realizedPnlPoints ?? 0)),
+        totalRealizedPnl: round4(items.reduce((sum, entry) => sum + (entry.realizedPnlPoints ?? 0), 0)),
+        detail: cluster.detail,
+      };
+    })
+    .filter((cluster) => cluster.count >= 2)
+    .sort((left, right) => right.count - left.count || left.totalRealizedPnl - right.totalRealizedPnl)
+    .slice(0, 4);
+}
+
+function buildSetupKillSuggestions(bySetupType: PaperPerformanceBucket[]) {
+  return bySetupType
+    .filter((bucket) => bucket.closed >= 3 && bucket.losses >= 2 && bucket.totalRealizedPnl < 0)
+    .map((bucket) => {
+      const winRate = bucket.winRate ?? 0;
+      const disable = bucket.closed >= 4 && bucket.losses >= 3 && winRate <= 0.34 && bucket.totalRealizedPnl <= -0.12;
+      const severity = disable ? 'disable' as const : 'downgrade' as const;
+      return {
+        key: `kill-${bucket.key}`,
+        setupType: bucket.key,
+        label: bucket.label,
+        severity,
+        tradeCount: bucket.closed,
+        lossCount: bucket.losses,
+        winRate: bucket.winRate,
+        totalRealizedPnl: bucket.totalRealizedPnl,
+        sampleNote: disable ? 'Enough closed losses to justify a hard stop.' : 'Early warning only, sample is still modest.',
+        rationale: disable
+          ? `${bucket.label} has ${bucket.losses} losses in ${bucket.closed} closes with ${round4(bucket.totalRealizedPnl)} realized PnL, which is a sustained drag.`
+          : `${bucket.label} is negative across ${bucket.closed} closes and is not yet earning normal sizing back.` ,
+        action: disable
+          ? `Disable ${bucket.label.toLowerCase()} entries until fresh paper data proves the family recovered.`
+          : `Downgrade ${bucket.label.toLowerCase()} to reduced sizing or watch-only until outcomes improve.`,
+      };
+    })
+    .sort((left, right) => (left.severity === right.severity ? left.totalRealizedPnl - right.totalRealizedPnl : left.severity === 'disable' ? -1 : 1))
+    .slice(0, 3);
 }
 
 export function getPaperBlotter() {
@@ -665,6 +940,8 @@ export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEn
   const closedEntries = entries.filter((entry) => entry.state === 'closed');
   const groups = new Map<string, PaperBlotterEntry[]>();
   const edgeGroups = new Map<string, { label: string; entries: PaperBlotterEntry[] }>();
+  const directionGroups = new Map<string, { label: string; entries: PaperBlotterEntry[] }>();
+  const confidenceGroups = new Map<string, { label: string; entries: PaperBlotterEntry[] }>();
 
   for (const entry of entries) {
     const list = groups.get(entry.setupType) ?? [];
@@ -675,6 +952,16 @@ export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEn
     const edgeList = edgeGroups.get(edgeBucket.key)?.entries ?? [];
     edgeList.push(entry);
     edgeGroups.set(edgeBucket.key, { label: edgeBucket.label, entries: edgeList });
+
+    const directionBucket = directionBucketFor(entry.direction);
+    const directionList = directionGroups.get(directionBucket.key)?.entries ?? [];
+    directionList.push(entry);
+    directionGroups.set(directionBucket.key, { label: directionBucket.label, entries: directionList });
+
+    const confidenceBucket = confidenceBucketKeyFor(entry.entryConfidence);
+    const confidenceList = confidenceGroups.get(confidenceBucket.key)?.entries ?? [];
+    confidenceList.push(entry);
+    confidenceGroups.set(confidenceBucket.key, { label: confidenceBucket.label, entries: confidenceList });
   }
 
   const bySetupType = Array.from(groups.entries())
@@ -682,6 +969,14 @@ export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEn
     .sort((left, right) => right.totalRealizedPnl - left.totalRealizedPnl || right.closed - left.closed);
 
   const byEdgeBucket = Array.from(edgeGroups.entries())
+    .map(([key, value]) => buildBucket(key, value.label, value.entries))
+    .sort((left, right) => right.totalRealizedPnl - left.totalRealizedPnl || right.closed - left.closed);
+
+  const byDirection = Array.from(directionGroups.entries())
+    .map(([key, value]) => buildBucket(key, value.label, value.entries))
+    .sort((left, right) => right.totalRealizedPnl - left.totalRealizedPnl || right.closed - left.closed);
+
+  const byConfidenceBucket = Array.from(confidenceGroups.entries())
     .map(([key, value]) => buildBucket(key, value.label, value.entries))
     .sort((left, right) => right.totalRealizedPnl - left.totalRealizedPnl || right.closed - left.closed);
 
@@ -693,13 +988,39 @@ export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEn
     .sort();
   const lastClosedAt = closedTimes.length ? closedTimes[closedTimes.length - 1] : null;
   const expectancyPerTrade = closedEntries.length ? round4(closedEntries.reduce((sum, entry) => sum + (entry.realizedPnlPoints ?? 0), 0) / closedEntries.length) : null;
+  const expectancyDrift = buildExpectancyDrift(entries);
   const recentForm = buildRecentForm(entries);
   const failureClusters = buildFailureClusters(entries);
+  const loserPatternClusters = buildLoserPatternClusters(entries);
+  const wins = closedEntries.filter((entry) => entry.outcome === 'win').map((entry) => entry.realizedPnlPoints ?? 0);
+  const losses = closedEntries.filter((entry) => entry.outcome === 'loss').map((entry) => Math.abs(entry.realizedPnlPoints ?? 0));
+  const avgWin = wins.length ? round4(wins.reduce((sum, value) => sum + value, 0) / wins.length) : null;
+  const avgLoss = losses.length ? round4(losses.reduce((sum, value) => sum + value, 0) / losses.length) : null;
+  const grossWins = wins.length ? wins.reduce((sum, value) => sum + value, 0) : 0;
+  const grossLosses = losses.length ? losses.reduce((sum, value) => sum + value, 0) : 0;
+  const payoffRatio = avgWin !== null && avgLoss !== null && avgLoss > 0 ? round4(avgWin / avgLoss) : null;
+  const profitFactor = grossLosses > 0 ? round4(grossWins / grossLosses) : wins.length ? null : null;
+  const setupFamilies = bySetupType
+    .filter((bucket) => bucket.closed > 0)
+    .map((bucket) => ({ ...bucket, expectancyPerTrade: bucketExpectancy(bucket), trendLabel: setupTrendLabel(bucket) }));
 
   return {
     totals,
     bySetupType,
     byEdgeBucket,
+    byDirection,
+    byConfidenceBucket,
+    expectancyDrift,
+    setupFamilyHeat: {
+      leaders: setupFamilies
+        .slice()
+        .sort((left, right) => (right.expectancyPerTrade ?? -999) - (left.expectancyPerTrade ?? -999) || right.closed - left.closed)
+        .slice(0, 3),
+      laggards: setupFamilies
+        .slice()
+        .sort((left, right) => (left.expectancyPerTrade ?? 999) - (right.expectancyPerTrade ?? 999) || right.closed - left.closed)
+        .slice(0, 3),
+    },
     fastValidation: {
       closedCount: closedEntries.length,
       expectancyPerTrade,
@@ -711,15 +1032,34 @@ export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEn
             ? 'Negative expectancy'
             : 'Near flat expectancy',
       recentForm,
+      scorecard: {
+        avgWin,
+        avgLoss,
+        payoffRatio,
+        profitFactor,
+        qualityLabel: closedEntries.length < 4
+          ? 'Sample still thin'
+          : expectancyPerTrade !== null && expectancyPerTrade > 0 && (profitFactor === null || profitFactor > 1)
+            ? 'Repeatable edge improving'
+            : expectancyPerTrade !== null && expectancyPerTrade < 0
+              ? 'Process needs tightening'
+              : 'Mixed tape, keep slicing',
+      },
       failureClusters,
+      loserPatternClusters,
     },
     diagnostics: {
       bestSetup: pickBestBucket(bySetupType),
       weakestSetup: pickWorstBucket(bySetupType),
       strongestEdgeBucket: pickBestBucket(byEdgeBucket),
       weakestEdgeBucket: pickWorstBucket(byEdgeBucket),
+      bestDirection: pickBestBucket(byDirection),
+      weakestDirection: pickWorstBucket(byDirection),
+      strongestConfidenceBucket: pickBestBucket(byConfidenceBucket),
+      weakestConfidenceBucket: pickWorstBucket(byConfidenceBucket),
+      setupKillSuggestions: buildSetupKillSuggestions(bySetupType),
       patterns: buildPatterns(entries, totals, bySetupType, byEdgeBucket),
-      lessons: buildLessons(totals, bySetupType, byEdgeBucket),
+      lessons: buildLessons(totals, bySetupType, byEdgeBucket, byDirection, byConfidenceBucket),
     },
     lastClosedAt,
   };

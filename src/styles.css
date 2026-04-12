@@ -119,7 +119,8 @@ li + li { margin-top: 0.35rem; }
 .review-panel,
 .summary-card,
 .system-banner,
-.account-command-panel { padding: 14px; }
+.account-command-panel,
+.operator-command-panel { padding: 14px; }
 
 .mission-hero {
   display: grid;
@@ -483,6 +484,10 @@ h2 { font-size: 1.02rem; text-transform: uppercase; letter-spacing: 0.03em; }
 .portfolio-panel .review-metrics { margin-bottom: 14px; }
 .execution-glance-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .execution-visibility-grid { align-items: start; }
+.intervention-summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.operator-intervention-grid { align-items: start; }
+.intervention-row { align-items: center; }
+.intervention-row .command-button { flex-shrink: 0; }
 .exposure-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -655,7 +660,8 @@ h2 { font-size: 1.02rem; text-transform: uppercase; letter-spacing: 0.03em; }
   .review-panel,
   .summary-card,
   .system-banner,
-  .account-command-panel { padding: 16px; }
+  .account-command-panel,
+  .operator-command-panel { padding: 16px; }
   .panel,
   .metric-card,
   .operator-card,

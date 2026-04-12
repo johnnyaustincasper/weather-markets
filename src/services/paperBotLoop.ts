@@ -1,5 +1,6 @@
 import type { WeatherMarket } from '../types.js';
 import { mergePaperExecutionSettings, type PaperExecutionProfile } from './paperExecutionSettings.js';
+import { DEFAULT_PAPER_RISK_GOVERNOR_SETTINGS, sanitizePaperRiskGovernorSettings, summarizePaperRiskGovernor, type PaperRiskGovernorSettings } from './paperRiskGovernor.js';
 import { buildPaperTradePlan, type PaperPositionState, type TradeDecision } from './paperTrading.js';
 import type { PersistentPaperState, PaperTradeRecord } from './paperPersistence.js';
 
@@ -42,6 +43,8 @@ export type PaperBotLoopState = {
   nextDueAt: string | null;
   lastError: string | null;
   lastSummary: string | null;
+  haltReason: string | null;
+  riskGovernor: PaperRiskGovernorSettings;
   recentActions: PaperBotLoopAction[];
   marketRuntime: Record<string, PaperBotMarketRuntime>;
 };
@@ -88,6 +91,8 @@ export const DEFAULT_PAPER_BOT_LOOP_STATE: PaperBotLoopState = {
   nextDueAt: null,
   lastError: null,
   lastSummary: null,
+  haltReason: null,
+  riskGovernor: DEFAULT_PAPER_RISK_GOVERNOR_SETTINGS,
   recentActions: [],
   marketRuntime: {},
 };
@@ -127,6 +132,7 @@ export function createPaperBotLoopState(overrides?: Partial<PaperBotLoopState>):
       ...DEFAULT_PAPER_BOT_LOOP_STATE.lease,
       ...(overrides?.lease ?? {}),
     },
+    riskGovernor: sanitizePaperRiskGovernorSettings(overrides?.riskGovernor),
     recentActions: Array.isArray(overrides?.recentActions) ? overrides.recentActions.slice(0, 20) : [],
     marketRuntime: overrides?.marketRuntime ?? {},
   };
@@ -140,6 +146,15 @@ export function getPaperBotCadenceLabel(cadenceMs: number) {
 
 export function runPaperBotTick({ state, markets, ownerId = 'local-runner', now = new Date().toISOString() }: RunPaperBotTickInput): RunPaperBotTickResult {
   const existingLoop = createPaperBotLoopState(state.botState);
+  const risk = summarizePaperRiskGovernor({
+    settings: existingLoop.riskGovernor,
+    startingCash: 1000,
+    blotter: state.paperBlotter,
+    orders: state.paperOrders,
+    paperState: state.paperState,
+    markets,
+    now,
+  });
 
   if (!existingLoop.enabled) {
     return {
@@ -149,6 +164,7 @@ export function runPaperBotTick({ state, markets, ownerId = 'local-runner', now 
           ...existingLoop,
           status: 'idle',
           lastSummary: 'Paper bot is disabled.',
+          haltReason: null,
           nextDueAt: null,
         },
       },
@@ -191,16 +207,22 @@ export function runPaperBotTick({ state, markets, ownerId = 'local-runner', now 
     let lastAction: PaperBotMarketRuntime['lastAction'] = 'held-market';
     let note = runtime.note;
 
-    if (existingTrade.state === 'flat' && plan.decision === 'would-trade') {
+    if (existingTrade.state === 'flat' && plan.decision === 'would-trade' && !risk.safeMode && !risk.halted) {
       nextTrade = makeTradeRecord('queued', `Auto-queued by bot after ${Math.abs(Math.round(market.edge * 100))} pt edge and ${Math.round(market.confidence * 100)}% confidence.`, now);
       actions.push({ type: 'queued-market', marketId: market.id, summary: `${market.title}: queued for paper entry.` });
       lastAction = 'queued-market';
       note = nextTrade.note;
-    } else if (existingTrade.state === 'queued' && plan.decision === 'would-trade' && existingLoop.allowAutoActivation && nextWouldTradeCount >= existingLoop.minTicksBeforeActivation) {
+    } else if (existingTrade.state === 'queued' && plan.decision === 'would-trade' && existingLoop.allowAutoActivation && nextWouldTradeCount >= existingLoop.minTicksBeforeActivation && !risk.safeMode && !risk.halted) {
       nextTrade = makeTradeRecord('active', `Auto-activated by bot after ${nextWouldTradeCount} consecutive qualifying ticks.`, now);
       actions.push({ type: 'activated-market', marketId: market.id, summary: `${market.title}: activated as paper position.` });
       lastAction = 'activated-market';
       note = nextTrade.note;
+    } else if ((risk.safeMode || risk.halted) && (existingTrade.state === 'flat' || existingTrade.state === 'queued') && plan.decision === 'would-trade') {
+      actions.push({ type: 'held-market', marketId: market.id, summary: `${market.title}: held by ${risk.halted ? 'risk halt' : 'safe mode'}.` });
+      lastAction = 'held-market';
+      note = risk.halted
+        ? 'Risk governor hard limits are breached, so the bot is blocking any fresh queueing or activation.'
+        : 'Safe mode is active, so the bot is preserving capital and not adding new paper risk.';
     } else if ((existingTrade.state === 'queued' || existingTrade.state === 'active') && existingLoop.allowAutoClosure) {
       const shouldClose = plan.decision === 'no-trade' || market.confidence < 0.55 || Math.abs(market.edge) < 0.03 || market.quoteStatus === 'stale' || market.quoteStatus === 'empty';
       if (shouldClose) {
@@ -245,10 +267,17 @@ export function runPaperBotTick({ state, markets, ownerId = 'local-runner', now 
     };
   }
 
+  if (risk.halted) {
+    actions.unshift({ type: 'lease-blocked', summary: `Risk governor blocked fresh risk this tick. ${risk.detail}` });
+  }
+
   const actionableCount = actions.filter((action) => action.type !== 'skipped-market').length;
-  const summary = actionableCount
+  const summaryBase = actionableCount
     ? `Tick ran on ${markets.length} markets, ${actionableCount} actionable updates, next run in ${getPaperBotCadenceLabel(existingLoop.cadenceMs)}.`
     : `Tick ran on ${markets.length} markets, no actionable updates, next run in ${getPaperBotCadenceLabel(existingLoop.cadenceMs)}.`;
+  const summary = risk.halted
+    ? `${summaryBase} Risk governor blocked fresh risk while allowing existing positions to keep managing out.`
+    : summaryBase;
 
   return {
     state: {
@@ -256,7 +285,8 @@ export function runPaperBotTick({ state, markets, ownerId = 'local-runner', now 
       paperState: nextPaperState,
       botState: {
         ...existingLoop,
-        status: 'cooldown',
+        status: risk.halted ? 'blocked' : 'cooldown',
+        haltReason: risk.halted ? risk.blockedReasons.join(', ') : risk.safeMode ? 'safe-mode' : null,
         lease: {
           ownerId,
           acquiredAt: now,
@@ -267,9 +297,14 @@ export function runPaperBotTick({ state, markets, ownerId = 'local-runner', now 
         lastTickCompletedAt: now,
         nextDueAt: addMs(now, existingLoop.cadenceMs),
         lastError: null,
-        lastSummary: summary,
+        lastSummary: risk.halted
+          ? summary
+          : risk.safeMode
+            ? `${summary} Safe mode is active, so no fresh queueing or activation was allowed.`
+            : summary,
         recentActions: [...actions, ...existingLoop.recentActions].slice(0, 20),
         marketRuntime: nextRuntime,
+        riskGovernor: existingLoop.riskGovernor,
       },
       syncedAt: now,
     },

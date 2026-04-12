@@ -8,6 +8,7 @@ import { localMarketProvider } from '../../src/services/marketData.js';
 import { runPaperBotTick } from '../../src/services/paperBotLoop.js';
 import type { PaperBotRunAuditEntry, PersistentPaperState } from '../../src/services/paperPersistence.js';
 import { buildPaperLedgerDocumentId, DEFAULT_LEDGER_COLLECTION, sanitizePersistentPaperState } from './paperLedger.js';
+import { describeOwnerLedgerIdentity } from '../../src/services/paperPersistence.js';
 
 initializeApp();
 setGlobalOptions({ maxInstances: 1, region: 'us-central1' });
@@ -22,6 +23,15 @@ export type PaperTickRunSummary = {
   ok: boolean;
   ledgerId: string;
   ownerId: string;
+  ownerScope: {
+    ownerUid: string;
+    ledgerId: string;
+    documentId: string;
+    collectionName: string;
+    documentPath: string;
+    envVar: 'WEATHER_MARKETS_RUNNER_ID';
+    note: string;
+  };
   actionCount: number;
   summary: string;
   marketCount: number;
@@ -49,12 +59,22 @@ function sanitizeRequestedValue(value: unknown) {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function buildWarnings(ownerId: string) {
+function buildWarnings(ownerId: string, ledgerId: string) {
   const warnings: string[] = [];
+  const ownerScope = describeOwnerLedgerIdentity(ownerId, ledgerId);
   if (!isConfiguredOwnerId(ownerId)) {
-    warnings.push('Runner ownerId is still the default firebase-scheduler placeholder. Set WEATHER_MARKETS_RUNNER_ID to the Firebase Auth uid that owns the paper ledger for always-on automation.');
+    warnings.push(`Runner ownerId is still the default firebase-scheduler placeholder. Set WEATHER_MARKETS_RUNNER_ID to the Firebase Auth uid that owns the paper ledger for always-on automation. Expected ledger path: ${ownerScope.documentPath}`);
   }
   return warnings;
+}
+
+function buildOwnerScope(ownerId: string, ledgerId: string): PaperTickRunSummary['ownerScope'] {
+  const ownerScope = describeOwnerLedgerIdentity(ownerId, ledgerId);
+  return {
+    ...ownerScope,
+    envVar: 'WEATHER_MARKETS_RUNNER_ID',
+    note: 'Set WEATHER_MARKETS_RUNNER_ID to this ownerUid so the backend runner writes to the same owner-scoped ledger document as the signed-in app.',
+  };
 }
 
 async function loadLedgerState(documentId: string): Promise<PersistentPaperState> {
@@ -89,9 +109,10 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
   const ledgerId = options?.ledgerId?.trim() || DEFAULT_LEDGER_ID;
   const ownerId = options?.ownerId?.trim() || DEFAULT_OWNER_ID;
   const trigger = options?.trigger ?? 'script';
+  const ownerScope = buildOwnerScope(ownerId, ledgerId);
   const documentId = buildPaperLedgerDocumentId(ledgerId, ownerId);
   const persistencePath = `${DEFAULT_LEDGER_COLLECTION}/${documentId}`;
-  const warnings = buildWarnings(ownerId);
+  const warnings = buildWarnings(ownerId, ledgerId);
 
   if (trigger === 'schedule' && !isConfiguredOwnerId(ownerId)) {
     const finishedAt = new Date().toISOString();
@@ -114,6 +135,7 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       baseLedgerId: ledgerId,
       documentId,
       source: 'firestore',
+      ownerScope,
       backend: {
         runner: ownerId,
         trigger,
@@ -141,6 +163,7 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       ok: false,
       ledgerId,
       ownerId,
+      ownerScope,
       actionCount: 0,
       summary: blockedSummary,
       marketCount: 0,
@@ -194,6 +217,7 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       baseLedgerId: ledgerId,
       documentId,
       source: 'firestore',
+      ownerScope,
       backend: {
         runner: ownerId,
         trigger,
@@ -228,6 +252,7 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       ok: true,
       ledgerId,
       ownerId,
+      ownerScope,
       actionCount: result.actions.length,
       summary: result.summary,
       marketCount: marketsResponse.markets.length,
@@ -270,6 +295,7 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       baseLedgerId: ledgerId,
       documentId,
       source: 'firestore',
+      ownerScope,
       backend: {
         runner: ownerId,
         trigger,
@@ -293,7 +319,7 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 
-    logger.error('Paper bot tick failed', { ledgerId, ownerId, trigger, persistencePath, error: message, warnings });
+    logger.error('Paper bot tick failed', { ledgerId, ownerId, ownerScope, trigger, persistencePath, error: message, warnings });
     throw error;
   }
 }

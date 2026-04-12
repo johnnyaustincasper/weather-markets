@@ -10,10 +10,14 @@ import {
   syncPaperBlotter,
   type PaperAfterActionReview,
   type PaperBlotterEntry,
+  type PaperPerformanceBucket,
 } from './services/paperBlotter';
 import { summarizePaperAccount } from './services/paperAccount';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
 import { cancelPaperOrder, getPaperOrders, placePaperOrder, syncPaperOrders, type PaperOrder } from './services/paperOrders';
+import {
+  summarizePaperRiskGovernor,
+} from './services/paperRiskGovernor';
 import {
   DEFAULT_PAPER_EXECUTION_SETTINGS,
   mergePaperExecutionSettings,
@@ -113,6 +117,8 @@ type CommandAction = {
   title: string;
   detail: string;
   tone: AlertTone | 'muted';
+  actionLabel?: string;
+  onAction?: () => void;
 };
 
 type ExposureBucket = {
@@ -128,6 +134,7 @@ type DeskAlert = {
   title: string;
   detail: string;
   tone: AlertTone | 'muted';
+  marketId?: string;
 };
 
 type BotActivityItem = {
@@ -301,7 +308,7 @@ function App() {
     } finally {
       setAuthBusy(false);
     }
-  }, [ledgerOwner]);
+  }, []);
 
   const handleSignOut = useCallback(async () => {
     try {
@@ -397,8 +404,27 @@ function App() {
   useEffect(() => {
     let active = true;
 
+    if (!isFirestorePersistenceEnabled()) {
+      setPersistenceStatus({
+        mode: 'local',
+        detail: 'Browser-local paper ledger. Add Firebase env vars to enable durable backend persistence.',
+      });
+      return () => {
+        active = false;
+      };
+    }
+
+    if (!ledgerOwner) {
+      setPersistenceStatus({
+        mode: 'local',
+        detail: `Firebase is configured for project ${getFirebaseProjectId()}, but browser persistence stays local until you sign in.`,
+      });
+      return () => {
+        active = false;
+      };
+    }
+
     void (async () => {
-      if (!isFirestorePersistenceEnabled() || !ledgerOwner) return;
       try {
         const result = await loadPersistentPaperState(ledgerOwner, DEFAULT_PAPER_LEDGER_ID);
         if (!active || !result.state) {
@@ -434,7 +460,7 @@ function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [ledgerOwner]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -497,7 +523,7 @@ function App() {
     }, 400);
 
     return () => window.clearTimeout(timeout);
-  }, [watchIds, paperState, paperExecutionProfile, paperBlotter, paperOrders, paperBotState, paperBotRunHistory]);
+  }, [ledgerOwner, watchIds, paperState, paperExecutionProfile, paperBlotter, paperOrders, paperBotState, paperBotRunHistory]);
 
   const runPaperBotNow = useCallback(() => {
     if (!markets.length) return;
@@ -608,13 +634,22 @@ function App() {
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
   const paperPerformance = useMemo(() => summarizePaperPerformance(paperBlotter), [paperBlotter]);
   const paperAccount = useMemo(() => summarizePaperAccount({ blotter: paperBlotter, orders: paperOrders, botState: paperBotState }), [paperBlotter, paperBotState, paperOrders]);
+  const paperRiskGovernor = useMemo(() => summarizePaperRiskGovernor({
+    settings: paperBotState.riskGovernor,
+    startingCash: paperAccount.startingCash,
+    blotter: paperBlotter,
+    orders: paperOrders,
+    paperState,
+    markets: displayMarkets,
+  }), [displayMarkets, paperAccount.startingCash, paperBlotter, paperBotState.riskGovernor, paperOrders, paperState]);
   const paperBotRuntime = useMemo(() => Object.values(paperBotState.marketRuntime), [paperBotState.marketRuntime]);
   const paperBotSupervision = useMemo(() => summarizePaperBotSupervision({
     botState: paperBotState,
     markets: displayMarkets,
     paperState,
+    paperBlotter,
     paperOrders,
-  }), [displayMarkets, paperBotState, paperOrders, paperState]);
+  }), [displayMarkets, paperBlotter, paperBotState, paperOrders, paperState]);
   const paperBotHotMarkets = useMemo(() => paperBotRuntime
     .filter((item) => item.state === 'queued' || item.state === 'active' || item.consecutiveWouldTradeTicks > 0)
     .sort((left, right) => right.consecutiveWouldTradeTicks - left.consecutiveWouldTradeTicks)
@@ -929,6 +964,7 @@ function App() {
 
   const handlePlacePaperOrder = () => {
     if (!selectedMarket || !selectedPlan || selectedPlan.direction === 'stand-aside' || selectedMarket.dataOrigin === 'curated-watchlist' || !selectedOrderDraft) return;
+    if (paperRiskGovernor.halted || paperRiskGovernor.safeMode) return;
     const result = placePaperOrder(selectedMarket, selectedPlan, selectedOrderDraft.quantity, selectedOrderDraft.limitPrice, selectedOrderDraft.note);
     setPaperOrders(result.orders);
     setPaperState((current) => ({
@@ -992,6 +1028,86 @@ function App() {
   const selectedFilledOrders = selectedOrders.filter((order) => order.filledQuantity > 0);
   const selectedLatestFilledOrder = selectedFilledOrders[0] ?? null;
   const selectedExitReady = Boolean(selectedBlotter?.exitSuggestion.shouldClose);
+  const operatorInterventions = useMemo(() => {
+    const actions: CommandAction[] = [];
+    const deskAlerts: DeskAlert[] = [];
+
+    if (!paperBotState.enabled) {
+      actions.push({
+        title: 'Automation is paused',
+        detail: 'No scheduler or UI tick will progress queued positions until the bot is re-enabled.',
+        tone: 'warn',
+        actionLabel: 'Enable bot',
+        onAction: togglePaperBotEnabled,
+      });
+    }
+
+    if (paperBotSupervision.healthTone === 'bad') {
+      actions.push({
+        title: 'Bot supervision needs intervention',
+        detail: paperBotSupervision.detail,
+        tone: 'bad',
+        actionLabel: 'Run bot now',
+        onAction: runPaperBotNow,
+      });
+    }
+
+    if (paperAccount.availableCash < 0) {
+      actions.push({
+        title: 'Buying power is over-allocated',
+        detail: `${formatUsd(Math.abs(paperAccount.availableCash))} more is reserved than currently free. Trim working paper orders before adding new risk.`,
+        tone: 'bad',
+      });
+    }
+
+    if (paperRiskGovernor.halted || paperRiskGovernor.safeMode) {
+      actions.push({
+        title: paperRiskGovernor.halted ? 'Risk governor is halting new risk' : 'Risk governor entered safe mode',
+        detail: paperRiskGovernor.detail,
+        tone: paperRiskGovernor.halted ? 'bad' : 'warn',
+      });
+    }
+
+    if (latestBotAudit?.staleMarketCount && latestBotAudit.staleMarketCount >= Math.max(2, Math.ceil(displayMarkets.length / 2))) {
+      actions.push({
+        title: 'Refresh stale board inputs',
+        detail: `${latestBotAudit.staleMarketCount} markets were stale on the latest bot audit, so current automation decisions deserve caution.`,
+        tone: 'warn',
+        actionLabel: 'Refresh board',
+        onAction: () => void fetchMarkets(true),
+      });
+    }
+
+    openBlotterEntries
+      .filter((entry) => entry.exitSuggestion.shouldClose)
+      .slice(0, 2)
+      .forEach((entry) => {
+        actions.push({
+          title: `Exit ready: ${entry.marketTitle}`,
+          detail: entry.exitSuggestion.summary,
+          tone: 'bad',
+          actionLabel: 'Open market',
+          onAction: () => setSelectedId(entry.marketId),
+        });
+      });
+
+    threatBoard.slice(0, 3).forEach(({ market, delta }) => {
+      deskAlerts.push({
+        title: market.title,
+        detail: delta.alerts[0]?.detail ?? `Quote state ${market.quoteStatus.toUpperCase()} and freshness ${freshnessLabel(market.freshnessMinutes)} need attention.`,
+        tone: delta.alerts.some((alert) => alert.tone === 'bad') || market.quoteStatus === 'empty' ? 'bad' : 'warn',
+        marketId: market.id,
+      });
+    });
+
+    exposureSummary.alerts.slice(0, 2).forEach((alert) => deskAlerts.push(alert));
+
+    return {
+      actions: actions.slice(0, 5),
+      alerts: deskAlerts.slice(0, 5),
+      urgentCount: actions.filter((item) => item.tone === 'bad').length + deskAlerts.filter((item) => item.tone === 'bad').length,
+    };
+  }, [displayMarkets.length, exposureSummary.alerts, fetchMarkets, latestBotAudit?.staleMarketCount, openBlotterEntries, paperAccount.availableCash, paperBotState.enabled, paperBotSupervision.detail, paperBotSupervision.healthTone, paperRiskGovernor.detail, paperRiskGovernor.halted, paperRiskGovernor.safeMode, runPaperBotNow, threatBoard, togglePaperBotEnabled]);
   const selectedActionQueue: CommandAction[] = selectedMarket && selectedPlan
     ? [
         selectedMarket.dataOrigin === 'curated-watchlist'
@@ -1242,6 +1358,77 @@ function App() {
             </div>
           </section>
         )}
+        <section className="panel review-panel operator-command-panel" data-panel="ops.intervention">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">Operator intervention center</p>
+              <h2>What needs a human right now</h2>
+              <p className="subtle panel-intro">This compresses the desk into immediate human decisions, so warnings, account stress, stale inputs, and exit-ready positions are not buried inside other panels.</p>
+            </div>
+            <div className="table-actions">
+              <span className={`status-pill tone-${operatorInterventions.urgentCount ? 'bad' : operatorInterventions.actions.length ? 'warn' : 'good'}`}>{operatorInterventions.urgentCount ? `${operatorInterventions.urgentCount} urgent` : operatorInterventions.actions.length ? 'Watchlist active' : 'No human action needed'}</span>
+              <span className="badge soft">{operatorInterventions.alerts.length} desk alerts</span>
+            </div>
+          </div>
+
+          <div className="execution-summary-grid review-metrics intervention-summary-grid">
+            <ExecutionSummaryCard label="Bot health" value={paperBotSupervision.healthLabel.toUpperCase()} detail={paperBotSupervision.detail} toneClass={paperBotSupervision.healthTone === 'bad' ? 'negative' : paperBotSupervision.healthTone === 'good' ? 'positive' : undefined} />
+            <ExecutionSummaryCard label="Buying power" value={formatUsd(paperAccount.availableCash)} detail={`${formatUsd(paperAccount.reservedCash)} reserved in working orders.`} toneClass={paperAccount.availableCash >= 0 ? 'positive' : 'negative'} />
+            <ExecutionSummaryCard label="Exit-ready positions" value={String(openBlotterEntries.filter((entry) => entry.exitSuggestion.shouldClose).length)} detail="Open paper campaigns already tripping exit logic." toneClass={openBlotterEntries.some((entry) => entry.exitSuggestion.shouldClose) ? 'negative' : 'positive'} />
+            <ExecutionSummaryCard label="Stale inputs" value={String(displayMarkets.filter((market) => market.freshnessMinutes >= 90 || market.quoteStatus === 'stale' || market.quoteStatus === 'empty').length)} detail="Markets whose quotes or weather data are not fresh enough to trust blindly." toneClass={displayMarkets.some((market) => market.freshnessMinutes >= 90 || market.quoteStatus === 'stale' || market.quoteStatus === 'empty') ? 'negative' : 'positive'} />
+          </div>
+
+          <div className="review-diagnostics-grid operator-intervention-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Immediate interventions</span>
+                  <p className="subtle">Concrete next steps, with buttons when the desk can act from here.</p>
+                </div>
+                <span className="badge soft">{operatorInterventions.actions.length}</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                {operatorInterventions.actions.length ? operatorInterventions.actions.map((item) => (
+                  <div className="stack-row review-row intervention-row" key={item.title}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{item.title}</strong>
+                        <span className={`status-pill tone-${item.tone}`}>{item.tone === 'bad' ? 'Act now' : item.tone === 'warn' ? 'Watch' : item.tone === 'good' ? 'Healthy' : 'Stand by'}</span>
+                      </div>
+                      <p>{item.detail}</p>
+                    </div>
+                    {item.actionLabel && item.onAction && <button className="command-button" onClick={item.onAction}>{item.actionLabel}</button>}
+                  </div>
+                )) : <p className="subtle">No immediate intervention items. The desk is currently in supervision mode, not rescue mode.</p>}
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Desk warnings</span>
+                  <p className="subtle">The highest-friction warnings across health, risk, and tape quality.</p>
+                </div>
+                <span className="badge soft">{operatorInterventions.alerts.length}</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                {operatorInterventions.alerts.length ? operatorInterventions.alerts.map((alert) => (
+                  <div className="stack-row review-row intervention-row" key={`${alert.title}-${alert.detail}`}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{alert.title}</strong>
+                        <span className={`status-pill tone-${alert.tone}`}>{alert.tone === 'bad' ? 'Escalated' : alert.tone === 'warn' ? 'Warning' : alert.tone === 'good' ? 'Healthy' : 'Info'}</span>
+                      </div>
+                      <p>{alert.detail}</p>
+                    </div>
+                    {alert.marketId && <button className="command-button" onClick={() => setSelectedId(alert.marketId!)}>Inspect</button>}
+                  </div>
+                )) : <p className="subtle">No current desk-wide warnings beyond normal monitoring.</p>}
+              </div>
+            </div>
+          </div>
+        </section>
+
         <section className="panel review-panel portfolio-panel" data-panel="bot.supervision">
           <div className="panel-header">
             <div>
@@ -1917,6 +2104,33 @@ function App() {
                   toneClass={paperPerformance.fastValidation.recentForm.totalRealizedPnl >= 0 ? 'positive' : 'negative'}
                 />
               </div>
+
+              <div className="execution-summary-grid compact-score-grid">
+                <ExecutionSummaryCard
+                  label="Avg winner"
+                  value={paperPerformance.fastValidation.scorecard.avgWin === null ? '--' : signedPct(paperPerformance.fastValidation.scorecard.avgWin)}
+                  detail="Average realized gain on winning closes."
+                  toneClass={paperPerformance.fastValidation.scorecard.avgWin !== null && paperPerformance.fastValidation.scorecard.avgWin > 0 ? 'positive' : undefined}
+                />
+                <ExecutionSummaryCard
+                  label="Avg loser"
+                  value={paperPerformance.fastValidation.scorecard.avgLoss === null ? '--' : signedPct(-paperPerformance.fastValidation.scorecard.avgLoss)}
+                  detail="Average realized loss on losing closes."
+                  toneClass={paperPerformance.fastValidation.scorecard.avgLoss !== null && paperPerformance.fastValidation.scorecard.avgLoss > 0 ? 'negative' : undefined}
+                />
+                <ExecutionSummaryCard
+                  label="Payoff ratio"
+                  value={paperPerformance.fastValidation.scorecard.payoffRatio === null ? '--' : `${paperPerformance.fastValidation.scorecard.payoffRatio.toFixed(2)}x`}
+                  detail="Avg winner divided by avg loser."
+                  toneClass={paperPerformance.fastValidation.scorecard.payoffRatio === null ? undefined : paperPerformance.fastValidation.scorecard.payoffRatio >= 1 ? 'positive' : 'negative'}
+                />
+                <ExecutionSummaryCard
+                  label="Profit factor"
+                  value={paperPerformance.fastValidation.scorecard.profitFactor === null ? '--' : `${paperPerformance.fastValidation.scorecard.profitFactor.toFixed(2)}x`}
+                  detail={paperPerformance.fastValidation.scorecard.qualityLabel}
+                  toneClass={paperPerformance.fastValidation.scorecard.profitFactor === null ? undefined : paperPerformance.fastValidation.scorecard.profitFactor >= 1 ? 'positive' : 'negative'}
+                />
+              </div>
             </div>
 
             <div className="intel-card">
@@ -1943,6 +2157,84 @@ function App() {
                     </div>
                   </div>
                 )) : <p className="subtle">No repeat failure mode yet. Keep closing trades and this will cluster the weak spots automatically.</p>}
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Loser pattern clusters</span>
+                  <p className="subtle">Repeated loss shapes, grouped by the way a paper trade broke down after entry.</p>
+                </div>
+              </div>
+
+              <div className="stack-list compact-review-list">
+                {paperPerformance.fastValidation.loserPatternClusters.length ? paperPerformance.fastValidation.loserPatternClusters.map((cluster) => (
+                  <div className="stack-row review-row" key={cluster.key}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{cluster.label}</strong>
+                        <span className="status-pill tone-bad">{cluster.count} repeats</span>
+                      </div>
+                      <p>{cluster.detail}</p>
+                      <small className="subtle">{cluster.setups.map(setupTypeLabel).join(' · ')}{cluster.directions.length ? ` · ${cluster.directions.map(directionLabel).join(' / ')}` : ''}</small>
+                    </div>
+                    <div className="source-metrics">
+                      <small>Avg edge {cluster.avgEntryEdge === null ? '--' : signedPct(cluster.avgEntryEdge)}</small>
+                      <small>Conf {cluster.avgConfidenceDrop === null ? '--' : signedPct(cluster.avgConfidenceDrop)}</small>
+                      <small>Total {signedPct(cluster.totalRealizedPnl)}</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">No repeat loser shape yet. Once losses start rhyming, this will surface the recurring pattern.</p>}
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Expectancy drift review</span>
+                  <p className="subtle">Compare the latest tape against the broader paper baseline so drift shows up fast.</p>
+                </div>
+                <span className={`status-pill tone-${paperPerformance.expectancyDrift.severity}`}>{paperPerformance.expectancyDrift.headline}</span>
+              </div>
+
+              <div className="execution-summary-grid compact-score-grid">
+                <ExecutionSummaryCard
+                  label={`Recent ${paperPerformance.expectancyDrift.recent.sampleSize || paperPerformance.expectancyDrift.recentWindow}`}
+                  value={paperPerformance.expectancyDrift.recent.expectancyPerTrade === null ? '--' : signedPct(paperPerformance.expectancyDrift.recent.expectancyPerTrade)}
+                  detail={paperPerformance.expectancyDrift.recent.sampleSize ? `${paperPerformance.expectancyDrift.recent.wins} wins · ${paperPerformance.expectancyDrift.recent.totalRealizedPnl >= 0 ? '+' : ''}${signedPct(Math.abs(paperPerformance.expectancyDrift.recent.totalRealizedPnl)).replace(/^[+\-]?/, '')} total realized`.replace('++', '+') : 'Need recent closes.'}
+                  toneClass={paperPerformance.expectancyDrift.recent.expectancyPerTrade === null ? undefined : paperPerformance.expectancyDrift.recent.expectancyPerTrade >= 0 ? 'positive' : 'negative'}
+                />
+                <ExecutionSummaryCard
+                  label={`Baseline ${paperPerformance.expectancyDrift.baseline.sampleSize || paperPerformance.expectancyDrift.baselineWindow}`}
+                  value={paperPerformance.expectancyDrift.baseline.expectancyPerTrade === null ? '--' : signedPct(paperPerformance.expectancyDrift.baseline.expectancyPerTrade)}
+                  detail={paperPerformance.expectancyDrift.baseline.sampleSize ? `${paperPerformance.expectancyDrift.baseline.winRate === null ? '--' : pct(paperPerformance.expectancyDrift.baseline.winRate)} win rate over the broader tape.` : 'Need broader baseline.'}
+                  toneClass={paperPerformance.expectancyDrift.baseline.expectancyPerTrade === null ? undefined : paperPerformance.expectancyDrift.baseline.expectancyPerTrade >= 0 ? 'positive' : 'negative'}
+                />
+                <ExecutionSummaryCard
+                  label="Drift / trade"
+                  value={paperPerformance.expectancyDrift.driftPerTrade === null ? '--' : signedPct(paperPerformance.expectancyDrift.driftPerTrade)}
+                  detail={paperPerformance.expectancyDrift.detail}
+                  toneClass={paperPerformance.expectancyDrift.driftPerTrade === null ? undefined : paperPerformance.expectancyDrift.driftPerTrade >= 0 ? 'positive' : 'negative'}
+                />
+                <ExecutionSummaryCard
+                  label="Recent win rate"
+                  value={paperPerformance.expectancyDrift.recent.winRate === null ? '--' : pct(paperPerformance.expectancyDrift.recent.winRate)}
+                  detail={paperPerformance.expectancyDrift.recent.sampleSize ? `${paperPerformance.expectancyDrift.recent.sampleSize} closes in the current drift window.` : 'Need recent closes.'}
+                  toneClass={paperPerformance.expectancyDrift.recent.winRate === null ? undefined : paperPerformance.expectancyDrift.recent.winRate >= 0.5 ? 'positive' : 'negative'}
+                />
+              </div>
+
+              <div className="stack-list compact-review-list">
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>{paperPerformance.expectancyDrift.headline}</strong>
+                      <span className={`status-pill tone-${paperPerformance.expectancyDrift.severity}`}>{paperPerformance.expectancyDrift.driftDirection.replace('-', ' ')}</span>
+                    </div>
+                    <p>{paperPerformance.expectancyDrift.detail}</p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -1995,6 +2287,19 @@ function App() {
             <div className="intel-card">
               <div className="subpanel-header">
                 <div>
+                  <span className="detail-label">Setup bias slices</span>
+                  <p className="subtle">A cleaner read on whether side selection and confidence quality are helping or hurting.</p>
+                </div>
+              </div>
+              <div className="exposure-grid">
+                <PerformanceSliceColumn title="By direction" buckets={paperPerformance.byDirection} />
+                <PerformanceSliceColumn title="By confidence" buckets={paperPerformance.byConfidenceBucket} />
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
                   <span className="detail-label">What seems to work</span>
                   <p className="subtle">Fast read on top and bottom areas, with simple desk lessons.</p>
                 </div>
@@ -2013,16 +2318,28 @@ function App() {
                   toneClass={paperPerformance.diagnostics.weakestSetup && paperPerformance.diagnostics.weakestSetup.totalRealizedPnl < 0 ? 'negative' : undefined}
                 />
                 <ExecutionSummaryCard
-                  label="Best edge bucket"
-                  value={paperPerformance.diagnostics.strongestEdgeBucket?.label ?? '--'}
-                  detail={paperPerformance.diagnostics.strongestEdgeBucket ? `${pct(paperPerformance.diagnostics.strongestEdgeBucket.winRate ?? 0)} win rate.` : 'Need closed trades.'}
-                  toneClass={paperPerformance.diagnostics.strongestEdgeBucket && paperPerformance.diagnostics.strongestEdgeBucket.totalRealizedPnl >= 0 ? 'positive' : undefined}
+                  label="Best direction"
+                  value={paperPerformance.diagnostics.bestDirection?.label ?? '--'}
+                  detail={paperPerformance.diagnostics.bestDirection ? `${signedPct(paperPerformance.diagnostics.bestDirection.totalRealizedPnl)} realized.` : 'Need closed trades.'}
+                  toneClass={paperPerformance.diagnostics.bestDirection && paperPerformance.diagnostics.bestDirection.totalRealizedPnl >= 0 ? 'positive' : undefined}
                 />
                 <ExecutionSummaryCard
-                  label="Weakest edge bucket"
-                  value={paperPerformance.diagnostics.weakestEdgeBucket?.label ?? '--'}
-                  detail={paperPerformance.diagnostics.weakestEdgeBucket ? `${signedPct(paperPerformance.diagnostics.weakestEdgeBucket.totalRealizedPnl)} realized.` : 'Need closed trades.'}
-                  toneClass={paperPerformance.diagnostics.weakestEdgeBucket && paperPerformance.diagnostics.weakestEdgeBucket.totalRealizedPnl < 0 ? 'negative' : undefined}
+                  label="Weakest direction"
+                  value={paperPerformance.diagnostics.weakestDirection?.label ?? '--'}
+                  detail={paperPerformance.diagnostics.weakestDirection ? `${signedPct(paperPerformance.diagnostics.weakestDirection.totalRealizedPnl)} realized.` : 'Need closed trades.'}
+                  toneClass={paperPerformance.diagnostics.weakestDirection && paperPerformance.diagnostics.weakestDirection.totalRealizedPnl < 0 ? 'negative' : undefined}
+                />
+                <ExecutionSummaryCard
+                  label="Best confidence"
+                  value={paperPerformance.diagnostics.strongestConfidenceBucket?.label ?? '--'}
+                  detail={paperPerformance.diagnostics.strongestConfidenceBucket ? `${pct(paperPerformance.diagnostics.strongestConfidenceBucket.winRate ?? 0)} win rate.` : 'Need closed trades.'}
+                  toneClass={paperPerformance.diagnostics.strongestConfidenceBucket && paperPerformance.diagnostics.strongestConfidenceBucket.totalRealizedPnl >= 0 ? 'positive' : undefined}
+                />
+                <ExecutionSummaryCard
+                  label="Weakest confidence"
+                  value={paperPerformance.diagnostics.weakestConfidenceBucket?.label ?? '--'}
+                  detail={paperPerformance.diagnostics.weakestConfidenceBucket ? `${signedPct(paperPerformance.diagnostics.weakestConfidenceBucket.totalRealizedPnl)} realized.` : 'Need closed trades.'}
+                  toneClass={paperPerformance.diagnostics.weakestConfidenceBucket && paperPerformance.diagnostics.weakestConfidenceBucket.totalRealizedPnl < 0 ? 'negative' : undefined}
                 />
               </div>
 
@@ -2049,6 +2366,78 @@ function App() {
                     </div>
                   </div>
                 )) : <p className="subtle">Lessons will appear once enough trades have been tracked.</p>}
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Setup family pressure map</span>
+                  <p className="subtle">Push winning families harder and flag losing families before they keep draining expectancy.</p>
+                </div>
+              </div>
+
+              <div className="stack-list compact-review-list">
+                <div className="source-title-row review-list-header">
+                  <strong>Kill suggestions</strong>
+                  <span className="status-pill tone-warn">Guardrails</span>
+                </div>
+                {paperPerformance.diagnostics.setupKillSuggestions.length ? paperPerformance.diagnostics.setupKillSuggestions.map((suggestion) => (
+                  <div className="stack-row review-row" key={suggestion.key}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{setupTypeLabel(suggestion.setupType)}</strong>
+                        <span className={`status-pill ${suggestion.severity === 'disable' ? 'tone-bad' : 'tone-warn'}`}>{suggestion.severity}</span>
+                      </div>
+                      <p>{suggestion.rationale}</p>
+                      <small className="subtle">{suggestion.action}</small>
+                    </div>
+                    <div className="source-metrics">
+                      <small>{suggestion.tradeCount} closes</small>
+                      <small>{suggestion.lossCount} losses</small>
+                      <small>{suggestion.winRate === null ? '--' : pct(suggestion.winRate)} win rate</small>
+                      <small>{signedPct(suggestion.totalRealizedPnl)} realized</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">No setup family is weak enough yet to recommend downgrading or disabling.</p>}
+              </div>
+
+              <div className="ops-split-grid">
+                <div className="stack-list compact-review-list">
+                  <div className="source-title-row review-list-header">
+                    <strong>Winning families</strong>
+                    <span className="status-pill tone-good">Leaders</span>
+                  </div>
+                  {paperPerformance.setupFamilyHeat.leaders.length ? paperPerformance.setupFamilyHeat.leaders.map((bucket) => (
+                    <div className="stack-row review-row" key={`leader-${bucket.key}`}>
+                      <div>
+                        <div className="source-title-row">
+                          <strong>{setupTypeLabel(bucket.key as WeatherMarket['resolutionSchema']['kind'])}</strong>
+                          <span className="status-pill tone-good">{bucket.trendLabel}</span>
+                        </div>
+                        <p>{bucket.closed} closes · {bucket.winRate === null ? '--' : pct(bucket.winRate)} win rate · {bucket.expectancyPerTrade === null ? '--' : signedPct(bucket.expectancyPerTrade)} expectancy/trade.</p>
+                      </div>
+                    </div>
+                  )) : <p className="subtle">Need closed trades before setup families can separate cleanly.</p>}
+                </div>
+
+                <div className="stack-list compact-review-list">
+                  <div className="source-title-row review-list-header">
+                    <strong>Losing families</strong>
+                    <span className="status-pill tone-bad">Laggards</span>
+                  </div>
+                  {paperPerformance.setupFamilyHeat.laggards.length ? paperPerformance.setupFamilyHeat.laggards.map((bucket) => (
+                    <div className="stack-row review-row" key={`laggard-${bucket.key}`}>
+                      <div>
+                        <div className="source-title-row">
+                          <strong>{setupTypeLabel(bucket.key as WeatherMarket['resolutionSchema']['kind'])}</strong>
+                          <span className={`status-pill tone-${bucket.expectancyPerTrade !== null && bucket.expectancyPerTrade < 0 ? 'bad' : 'warn'}`}>{bucket.trendLabel}</span>
+                        </div>
+                        <p>{bucket.closed} closes · {bucket.winRate === null ? '--' : pct(bucket.winRate)} win rate · {bucket.expectancyPerTrade === null ? '--' : signedPct(bucket.expectancyPerTrade)} expectancy/trade.</p>
+                      </div>
+                    </div>
+                  )) : <p className="subtle">No lagging family identified yet.</p>}
+                </div>
               </div>
             </div>
           </div>
@@ -2269,6 +2658,32 @@ function ExposureColumn({ title, buckets }: { title: string; buckets: ExposureBu
           </div>
         </div>
       )) : <p className="subtle">No tracked exposure yet.</p>}
+    </div>
+  );
+}
+
+function PerformanceSliceColumn({ title, buckets }: { title: string; buckets: PaperPerformanceBucket[] }) {
+  return (
+    <div className="stack-list compact-review-list">
+      <div className="source-title-row review-list-header">
+        <strong>{title}</strong>
+        <span className="status-pill tone-muted">{buckets.length}</span>
+      </div>
+      {buckets.length ? buckets.map((bucket) => (
+        <div className="stack-row review-row" key={bucket.key}>
+          <div>
+            <div className="source-title-row">
+              <strong>{bucket.label}</strong>
+              <span className="status-pill tone-muted">{bucket.total} tracked</span>
+            </div>
+            <p>{bucket.closed ? `${pct(bucket.winRate ?? 0)} win rate · ${signedPct(bucket.totalRealizedPnl)} realized.` : `No closed trades yet, ${bucket.open} active and ${bucket.queued} queued.`}</p>
+          </div>
+          <div className="source-metrics">
+            <small>{bucket.closed} closed</small>
+            <small>Avg {bucket.avgRealizedPnl === null ? '--' : signedPct(bucket.avgRealizedPnl)}</small>
+          </div>
+        </div>
+      )) : <p className="subtle">No tracked slices yet.</p>}
     </div>
   );
 }
