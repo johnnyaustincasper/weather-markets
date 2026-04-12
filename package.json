@@ -6,10 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.app.json && vite build",
+    "build:functions": "npm --prefix functions run build",
     "preview": "vite preview",
     "deploy": "npm run build && firebase deploy --only hosting,firestore:rules,firestore:indexes",
     "deploy:firebase": "firebase deploy --only hosting,firestore:rules,firestore:indexes",
-    "deploy:firestore": "firebase deploy --only firestore:rules,firestore:indexes"
+    "deploy:firestore": "firebase deploy --only firestore:rules,firestore:indexes",
+    "deploy:functions": "npm --prefix functions run deploy",
+    "deploy:backend": "npm run build:functions && firebase deploy --only functions,firestore:rules,firestore:indexes"
   },
   "dependencies": {
     "firebase": "^12.12.0",
