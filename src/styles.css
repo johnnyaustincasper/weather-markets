@@ -218,8 +218,9 @@ th, td {
 th { color: var(--muted); font-weight: 600; font-size: 0.8rem; }
 tbody tr { cursor: pointer; transition: background 180ms ease; }
 tbody tr:hover, .active-row { background: rgba(255,255,255,0.04); }
-.market-cell, .delta-cell { display: grid; gap: 4px; }
-.delta-cell small { font-weight: 700; }
+.market-cell, .delta-cell, .market-type-cell { display: grid; gap: 4px; }
+.delta-cell small,
+.market-type-cell small { font-weight: 700; }
 
 .paper-engine-panel,
 .history-list,

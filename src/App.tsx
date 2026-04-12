@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { getMockMarkets } from './data/mockMarkets';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
 import { getPaperBlotter, repricePaperBlotter, syncPaperBlotter, type PaperBlotterEntry } from './services/paperBlotter';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
@@ -40,7 +41,7 @@ const formatDateTime = (iso?: string) => {
   return new Date(iso).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 };
 
-type MarketStatus = 'best' | 'watch' | 'stale' | 'skip';
+type MarketStatus = 'best' | 'watch' | 'candidate' | 'stale' | 'skip';
 type AlertTone = 'good' | 'warn' | 'bad';
 
 type MarketAlert = {
@@ -105,6 +106,7 @@ const loadPaperExecutionProfile = (): PaperExecutionProfile => {
 };
 
 const deriveMarketStatus = (market: WeatherMarket, decision: 'would-trade' | 'watch' | 'no-trade', watched: boolean): MarketStatus => {
+  if (market.dataOrigin === 'curated-watchlist') return 'candidate';
   if (market.freshnessMinutes >= 180 || market.quoteStatus === 'empty') return 'skip';
   if (market.freshnessMinutes >= 90 || market.quoteStatus === 'stale') return 'stale';
   if (decision === 'would-trade') return 'best';
@@ -288,18 +290,27 @@ function App() {
     return () => window.clearInterval(interval);
   }, [refreshQuotes]);
 
-  const selectedMarket = useMemo(() => markets.find((market) => market.id === selectedId) ?? markets[0], [markets, selectedId]);
   const watchSet = useMemo(() => new Set(watchIds), [watchIds]);
-  const effectivePaperSettings = useMemo(() => Object.fromEntries(markets.map((market) => [market.id, mergePaperExecutionSettings(paperExecutionProfile, market.id)])), [markets, paperExecutionProfile]);
-  const paperPlans = useMemo(() => Object.fromEntries(markets.map((market) => [market.id, buildPaperTradePlan(market, effectivePaperSettings[market.id])])), [markets, effectivePaperSettings]);
+  const liveGoodMatches = useMemo(() => markets.filter((market) => market.dataOrigin !== 'curated-watchlist').filter((market) => {
+    const plan = buildPaperTradePlan(market, mergePaperExecutionSettings(paperExecutionProfile, market.id));
+    return plan.decision === 'would-trade' || plan.decision === 'watch';
+  }), [markets, paperExecutionProfile]);
+  const fallbackMarkets = useMemo(() => getMockMarkets(), []);
+  const displayMarkets = useMemo(() => {
+    const liveMarkets = markets.filter((market) => market.dataOrigin !== 'curated-watchlist');
+    return liveGoodMatches.length ? [...liveMarkets, ...fallbackMarkets] : [...fallbackMarkets, ...liveMarkets];
+  }, [fallbackMarkets, liveGoodMatches.length, markets]);
+  const selectedMarket = useMemo(() => displayMarkets.find((market) => market.id === selectedId) ?? displayMarkets[0], [displayMarkets, selectedId]);
+  const effectivePaperSettings = useMemo(() => Object.fromEntries(displayMarkets.map((market) => [market.id, mergePaperExecutionSettings(paperExecutionProfile, market.id)])), [displayMarkets, paperExecutionProfile]);
+  const paperPlans = useMemo(() => Object.fromEntries(displayMarkets.map((market) => [market.id, buildPaperTradePlan(market, effectivePaperSettings[market.id])])), [displayMarkets, effectivePaperSettings]);
 
   const marketDeltas = useMemo(() => {
-    return Object.fromEntries(markets.map((market) => {
+    return Object.fromEntries(displayMarkets.map((market) => {
       const plan = paperPlans[market.id];
       const status = deriveMarketStatus(market, plan.decision, watchSet.has(market.id));
       return [market.id, buildMarketAlerts(market, previousMarkets[market.id], status)];
     }));
-  }, [markets, paperPlans, previousMarkets, watchSet]);
+  }, [displayMarkets, paperPlans, previousMarkets, watchSet]);
 
   const allAlerts = useMemo(() => {
     return Object.values(marketDeltas)
@@ -308,26 +319,27 @@ function App() {
       .slice(0, 10);
   }, [marketDeltas]);
 
-  const selectedTrend = useMemo(() => selectedMarket ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
-  const selectedHistory = useMemo(() => selectedMarket ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
+  const selectedTrend = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
+  const selectedHistory = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 4), [selectedHistory]);
 
   useEffect(() => {
-    setPaperBlotter(syncPaperBlotter(markets, paperState, paperPlans, paperExecutionProfile));
-  }, [markets, paperExecutionProfile, paperPlans, paperState]);
+    setPaperBlotter(syncPaperBlotter(displayMarkets, paperState, paperPlans, paperExecutionProfile));
+  }, [displayMarkets, paperExecutionProfile, paperPlans, paperState]);
 
-  const liveTradeCount = markets.filter((market) => paperPlans[market.id]?.decision === 'would-trade').length;
-  const watchCount = markets.filter((market) => paperPlans[market.id]?.decision === 'watch').length;
-  const topTrade = markets[0];
+  const liveTradeCount = displayMarkets.filter((market) => market.dataOrigin !== 'curated-watchlist' && paperPlans[market.id]?.decision === 'would-trade').length;
+  const watchCount = displayMarkets.filter((market) => market.dataOrigin === 'curated-watchlist' || paperPlans[market.id]?.decision === 'watch').length;
+  const topTrade = displayMarkets[0];
   const paperQueueCount = Object.values(paperState).filter((item) => item.state === 'queued' || item.state === 'active').length;
+  const showingFallbackFirst = !liveGoodMatches.length;
   const scanState = error
     ? 'Scanner offline, showing cached state until feeds recover.'
     : loading && !meta
       ? 'Scanning Polymarket and weather feeds for the first ranked trade list.'
       : refreshing
         ? 'Refreshing market odds and model odds now.'
-        : meta?.usedCuratedFallback
-          ? 'Live weather discovery is thin, so the app is filling the board from the curated watchlist.'
+        : showingFallbackFirst || meta?.usedCuratedFallback
+          ? 'No strong live contract made the board, so the app is leading with clearly labeled WATCHLIST SETUP candidates until better live listings appear.'
           : 'Live scan online. Market odds are being compared against current weather-model odds.';
 
   const toggleWatch = (marketId: string) => {
@@ -353,7 +365,7 @@ function App() {
   };
 
   const handleRepricePaperBlotter = () => {
-    const result = repricePaperBlotter(markets, paperState, paperPlans, paperExecutionProfile);
+    const result = repricePaperBlotter(displayMarkets, paperState, paperPlans, paperExecutionProfile);
     setPaperBlotter(result.blotter);
     setPaperRepriceMeta({ at: result.repricedAt, changedCount: result.changedCount });
   };
@@ -381,9 +393,9 @@ function App() {
               <div className="hero-step"><strong>3</strong><span>Paper trade the cleanest ideas</span></div>
             </div>
             <div className="hero-status-row">
-              <span className={`badge ${error ? 'tone-bad' : meta?.usedCuratedFallback ? 'tone-warn' : 'tone-good'}`}>{error ? 'Scanner offline' : meta?.usedCuratedFallback ? 'Fallback board' : 'Live board'}</span>
+              <span className={`badge ${error ? 'tone-bad' : showingFallbackFirst || meta?.usedCuratedFallback ? 'tone-warn' : 'tone-good'}`}>{error ? 'Scanner offline' : showingFallbackFirst || meta?.usedCuratedFallback ? 'Fallback-first board' : 'Live board'}</span>
               <span className="badge soft">Last scan {formatClock(lastScanAt || meta?.refreshedAt)}</span>
-              <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} contracts ranked` : 'Building trade list'}</span>
+              <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} live contracts found` : 'Building trade list'}</span>
             </div>
             <p className="subtle hero-status-copy">{scanState}</p>
           </div>
@@ -404,7 +416,7 @@ function App() {
               <div>
                 <p className="eyebrow">Core trade list</p>
                 <h2>Best weather trades right now</h2>
-                <p className="subtle panel-intro">Read each row as: market odds, model odds, the gap between them, and whether the app would paper trade it.</p>
+                <p className="subtle panel-intro">Rows are brutally labeled. LIVE CONTRACT means a real exchange listing. WATCHLIST SETUP means a fallback candidate to monitor until a real listing appears.</p>
               </div>
               <div className="table-actions">
                 <span className="badge">{meta?.weatherSourceMix.join(' · ') ?? 'Live feeds'}</span>
@@ -417,6 +429,7 @@ function App() {
                 <thead>
                   <tr>
                     <th>Trade</th>
+                    <th>Type</th>
                     <th>Market</th>
                     <th>Model</th>
                     <th>Edge</th>
@@ -425,7 +438,7 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {markets.map((market) => {
+                  {displayMarkets.map((market) => {
                     const plan = paperPlans[market.id];
                     const delta = marketDeltas[market.id];
                     const watched = watchSet.has(market.id);
@@ -441,7 +454,13 @@ function App() {
                             </div>
                           </div>
                         </td>
-                        <td>{pct(market.impliedProbability)}</td>
+                        <td>
+                          <div className="market-type-cell">
+                            <span className={`status-chip ${market.dataOrigin === 'curated-watchlist' ? 'tone-warn' : 'tone-good'}`}>{market.dataOrigin === 'curated-watchlist' ? 'WATCHLIST SETUP' : 'LIVE CONTRACT'}</span>
+                            <small>{market.dataOrigin === 'curated-watchlist' ? 'Not tradeable yet' : 'Real listed market'}</small>
+                          </div>
+                        </td>
+                        <td>{market.dataOrigin === 'curated-watchlist' ? '--' : pct(market.impliedProbability)}</td>
                         <td>{pct(market.modelProbability)}</td>
                         <td>
                           <div className="delta-cell">
@@ -450,7 +469,7 @@ function App() {
                           </div>
                         </td>
                         <td>
-                          <span className={`status-chip ${paperDecisionToneClass(plan.decision)}`}>{paperDecisionLabel(plan.decision)}</span>
+                          <span className={`status-chip ${market.dataOrigin === 'curated-watchlist' ? 'tone-warn' : paperDecisionToneClass(plan.decision)}`}>{market.dataOrigin === 'curated-watchlist' ? 'Watchlist only' : paperDecisionLabel(plan.decision)}</span>
                         </td>
                         <td>{freshnessLabel(market.freshnessMinutes)}</td>
                       </tr>
@@ -467,7 +486,7 @@ function App() {
                 <div>
                   <p className="eyebrow">Selected trade</p>
                   <h2>{selectedMarket?.title ?? 'Select a trade'}</h2>
-                  <p className="subtle panel-intro">A plain-English view of why this trade is interesting, and how to paper trade it.</p>
+                  <p className="subtle panel-intro">A plain-English view of why this row matters, with very clear separation between live contracts and fallback watchlist setups.</p>
                 </div>
                 {selectedMarket && (
                   <button className={`watch-toggle ${watchSet.has(selectedMarket.id) ? 'active' : ''}`} onClick={() => toggleWatch(selectedMarket.id)}>
@@ -479,14 +498,15 @@ function App() {
               {selectedMarket && selectedPlan && selectedDelta && (
                 <>
                   <div className="detail-metrics trade-metrics">
-                    <Metric label="Market odds" value={pct(selectedMarket.impliedProbability)} />
+                    <Metric label="Row type" value={selectedMarket.dataOrigin === 'curated-watchlist' ? 'WATCHLIST SETUP' : 'LIVE CONTRACT'} positive={selectedMarket.dataOrigin !== 'curated-watchlist'} />
+                    <Metric label="Market odds" value={selectedMarket.dataOrigin === 'curated-watchlist' ? '--' : pct(selectedMarket.impliedProbability)} />
                     <Metric label="Model odds" value={pct(selectedMarket.modelProbability)} />
                     <Metric label="Edge" value={signedPct(selectedMarket.edge)} positive={selectedMarket.edge >= 0} />
-                    <Metric label="Paper action" value={paperDecisionLabel(selectedPlan.decision)} positive={selectedPlan.decision === 'would-trade'} />
+                    <Metric label="Paper action" value={selectedMarket.dataOrigin === 'curated-watchlist' ? 'Watchlist only' : paperDecisionLabel(selectedPlan.decision)} positive={selectedPlan.decision === 'would-trade'} />
                   </div>
 
                   <div className="operator-grid simple-cards">
-                    <ActionCard title="Trade direction" body={paperDirectionLabel(selectedPlan.direction)} emphasis />
+                    <ActionCard title="Trade direction" body={selectedMarket.dataOrigin === 'curated-watchlist' ? 'Wait for live listing' : paperDirectionLabel(selectedPlan.direction)} emphasis />
                     <ActionCard title="Why it matters" body={selectedPlan.thesis} />
                     <ActionCard title="Entry" body={selectedPlan.entryTrigger} />
                     <ActionCard title="Exit" body={selectedPlan.stopTrigger} />
@@ -513,7 +533,7 @@ function App() {
                     <div className="paper-engine-header">
                       <div>
                         <span className="detail-label">Paper trading</span>
-                        <p className="subtle">Track what you would do, without sending real orders.</p>
+                        <p className="subtle">Track what you would do, without sending real orders. Watchlist setups stay explicitly non-executable.</p>
                       </div>
                       <div className="paper-state-actions">
                         <button className={`watch-toggle ${selectedPaperState?.state === 'flat' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'flat')}>Flat</button>
@@ -566,7 +586,7 @@ function App() {
                 </div>
                 <div className="table-actions">
                   <span className="badge soft">{selectedTrend?.snapshotCount ?? 0} snapshots</span>
-                  <span className={`badge soft ${selectedMarket ? quoteToneClass(selectedMarket.quoteStatus) : ''}`}>{selectedMarket?.quoteStatus?.toUpperCase() ?? 'NO QUOTE'}</span>
+                  <span className={`badge soft ${selectedMarket ? quoteToneClass(selectedMarket.quoteStatus) : ''}`}>{selectedMarket?.dataOrigin === 'curated-watchlist' ? 'WATCHLIST ONLY' : selectedMarket?.quoteStatus?.toUpperCase() ?? 'NO QUOTE'}</span>
                 </div>
               </div>
               {selectedMarket && (
@@ -578,7 +598,9 @@ function App() {
                 </div>
               )}
               <div className="history-list compact-history">
-                {historyPreview.length ? historyPreview.map((snapshot, index) => <HistoryRow key={`${snapshot.capturedAt}-${index}`} snapshot={snapshot} />) : <p className="subtle">History appears after another refresh.</p>}
+                {selectedMarket?.dataOrigin === 'curated-watchlist'
+                  ? <p className="subtle">This row is a fallback watchlist setup, so there is no live contract history yet.</p>
+                  : historyPreview.length ? historyPreview.map((snapshot, index) => <HistoryRow key={`${snapshot.capturedAt}-${index}`} snapshot={snapshot} />) : <p className="subtle">History appears after another refresh.</p>}
               </div>
             </section>
           </div>
@@ -588,7 +610,7 @@ function App() {
           <div className="panel summary-card">
             <span className="summary-label">Top setup now</span>
             <strong>{topTrade?.title ?? 'Waiting for scan'}</strong>
-            <span className="subtle">{topTrade ? `${signedPct(topTrade.edge)} edge, ${pct(topTrade.confidence)} confidence.` : 'The first scan is still loading.'}</span>
+            <span className="subtle">{topTrade ? `${topTrade.dataOrigin === 'curated-watchlist' ? 'WATCHLIST SETUP' : 'LIVE CONTRACT'} · ${signedPct(topTrade.edge)} edge, ${pct(topTrade.confidence)} confidence.` : 'The first scan is still loading.'}</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Scanner alerts</span>
@@ -734,13 +756,14 @@ function paperDirectionLabel(direction: 'buy-yes' | 'buy-no' | 'stand-aside') {
 function statusLabel(status: MarketStatus) {
   if (status === 'best') return 'Best setup';
   if (status === 'watch') return 'Watch';
+  if (status === 'candidate') return 'Fallback candidate';
   if (status === 'stale') return 'Stale';
   return 'Skip';
 }
 
 function statusToneClass(status: MarketStatus) {
   if (status === 'best') return 'tone-good';
-  if (status === 'watch') return 'tone-warn';
+  if (status === 'watch' || status === 'candidate') return 'tone-warn';
   if (status === 'stale') return 'tone-bad';
   return 'tone-muted';
 }
