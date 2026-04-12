@@ -2,10 +2,12 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { getMockMarkets } from './data/mockMarkets';
 import { applyQuoteRefreshToMarket, localMarketProvider } from './services/marketData';
 import {
+  buildPaperAfterActionReview,
   getPaperBlotter,
   repricePaperBlotter,
   summarizePaperPerformance,
   syncPaperBlotter,
+  type PaperAfterActionReview,
   type PaperBlotterEntry,
 } from './services/paperBlotter';
 import { buildPaperTradePlan, type PaperPositionState } from './services/paperTrading';
@@ -196,6 +198,7 @@ function App() {
   const [paperOrders, setPaperOrders] = useState<Record<string, PaperOrder[]>>(() => getPaperOrders());
   const [paperOrderDrafts, setPaperOrderDrafts] = useState<Record<string, { quantity: number; limitPrice: number; note: string }>>({});
   const [paperRepriceMeta, setPaperRepriceMeta] = useState<{ at: string; changedCount: number } | null>(null);
+  const [selectedReviewMarketId, setSelectedReviewMarketId] = useState('');
 
   const fetchMarkets = useCallback(async (silent = false) => {
     if (silent) setRefreshing(true);
@@ -334,6 +337,24 @@ function App() {
   const selectedHistory = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
   const paperPerformance = useMemo(() => summarizePaperPerformance(paperBlotter), [paperBlotter]);
+  const afterActionReviews = useMemo(() => Object.values(paperBlotter)
+    .slice()
+    .sort((left, right) => new Date(right.closedAt ?? right.lastMarkedAt ?? 0).getTime() - new Date(left.closedAt ?? left.lastMarkedAt ?? 0).getTime())
+    .map((entry) => buildPaperAfterActionReview(entry)), [paperBlotter]);
+  const selectedAfterActionReview = useMemo(() => {
+    if (!afterActionReviews.length) return null;
+    return afterActionReviews.find((entry) => entry.marketId === selectedReviewMarketId) ?? afterActionReviews[0];
+  }, [afterActionReviews, selectedReviewMarketId]);
+
+  useEffect(() => {
+    if (!afterActionReviews.length) {
+      if (selectedReviewMarketId) setSelectedReviewMarketId('');
+      return;
+    }
+    if (!selectedReviewMarketId || !afterActionReviews.some((entry) => entry.marketId === selectedReviewMarketId)) {
+      setSelectedReviewMarketId(afterActionReviews[0].marketId);
+    }
+  }, [afterActionReviews, selectedReviewMarketId]);
 
   useEffect(() => {
     setPaperBlotter(syncPaperBlotter(displayMarkets, paperState, paperPlans, paperExecutionProfile));
@@ -821,6 +842,82 @@ function App() {
               </div>
             </div>
           </div>
+
+          <div className="review-diagnostics-grid after-action-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">After-action queue</span>
+                  <p className="subtle">Pick a tracked trade and review what actually drove the result.</p>
+                </div>
+                <span className="badge soft">{afterActionReviews.length} tracked</span>
+              </div>
+              <div className="stack-list compact-review-list review-selector-list">
+                {afterActionReviews.length ? afterActionReviews.map((review) => (
+                  <button key={review.marketId} type="button" className={`review-selector ${selectedAfterActionReview?.marketId === review.marketId ? 'selected' : ''}`} onClick={() => setSelectedReviewMarketId(review.marketId)}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{review.marketTitle}</strong>
+                        <span className={`status-pill ${reviewVerdictToneClass(review.verdict)}`}>{review.verdict.replace('-', ' ')}</span>
+                      </div>
+                      <p>{review.headline}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>{review.outcome.toUpperCase()}</small>
+                      <small>Score {review.score}/100</small>
+                    </div>
+                  </button>
+                )) : <p className="subtle">Track a few trades and this becomes your local post-trade desk review.</p>}
+              </div>
+            </div>
+
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Actionable trade review</span>
+                  <p className="subtle">Focus on decision quality, not just the outcome.</p>
+                </div>
+                {selectedAfterActionReview && <span className={`status-pill ${reviewVerdictToneClass(selectedAfterActionReview.verdict)}`}>Score {selectedAfterActionReview.score}/100</span>}
+              </div>
+
+              {selectedAfterActionReview ? (
+                <div className="stack-list after-action-detail">
+                  <div className="score-card">
+                    <span>Review headline</span>
+                    <strong>{selectedAfterActionReview.headline}</strong>
+                    <p>{selectedAfterActionReview.summary}</p>
+                  </div>
+
+                  <div className="execution-summary-grid compact-score-grid">
+                    <ExecutionSummaryCard label="Outcome" value={selectedAfterActionReview.outcome.toUpperCase()} detail={selectedAfterActionReview.marketTitle} toneClass={selectedAfterActionReview.outcome === 'win' ? 'positive' : selectedAfterActionReview.outcome === 'loss' ? 'negative' : undefined} />
+                    <ExecutionSummaryCard label="Verdict" value={selectedAfterActionReview.verdict.replace('-', ' ').toUpperCase()} detail="Process quality, not just PnL." toneClass={reviewVerdictTextClass(selectedAfterActionReview.verdict)} />
+                  </div>
+
+                  <ReviewListCard title="Why this trade ended this way" tone="good" items={selectedAfterActionReview.why} emptyLabel="Add more tracked history to sharpen causal review." />
+                  <ReviewListCard title="What to keep" tone="good" items={selectedAfterActionReview.strengths} emptyLabel="No clear strengths yet." />
+                  <ReviewListCard title="Warnings" tone="bad" items={selectedAfterActionReview.warnings} emptyLabel="No major warnings flagged." />
+                  <ReviewListCard title="Refine next time" tone="warn" items={selectedAfterActionReview.refineNextTime} emptyLabel="No refinement ideas yet." />
+
+                  <div className="stack-list compact-review-list">
+                    {selectedAfterActionReview.timeline.map((step) => (
+                      <div className="stack-row review-row" key={step.label}>
+                        <div>
+                          <div className="source-title-row">
+                            <strong>{step.label}</strong>
+                            <span className="status-pill tone-muted">{step.at ? formatClock(step.at) : 'N/A'}</span>
+                          </div>
+                          <p>{step.detail}</p>
+                        </div>
+                        <div className="source-metrics">
+                          <small>{step.at ? formatDateTime(step.at) : 'No timestamp'}</small>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : <p className="subtle">No tracked paper trades yet.</p>}
+            </div>
+          </div>
         </section>
 
         <section className="footer-strip">
@@ -944,6 +1041,20 @@ function ExecutionSummaryCard({ label, value, detail, toneClass }: { label: stri
   );
 }
 
+function ReviewListCard({ title, items, tone, emptyLabel }: { title: string; items: string[]; tone: 'good' | 'warn' | 'bad'; emptyLabel: string }) {
+  return (
+    <div className="intel-card">
+      <div className="source-title-row review-list-header">
+        <strong>{title}</strong>
+        <span className={`status-pill tone-${tone}`}>{items.length} notes</span>
+      </div>
+      <ul>
+        {items.length ? items.map((item) => <li key={item}>{item}</li>) : <li>{emptyLabel}</li>}
+      </ul>
+    </div>
+  );
+}
+
 function paperDecisionLabel(decision: 'would-trade' | 'watch' | 'no-trade') {
   if (decision === 'would-trade') return 'Deploy';
   if (decision === 'watch') return 'Monitor';
@@ -996,6 +1107,18 @@ function setupTypeLabel(value: string) {
   if (value === 'namedStorm') return 'Named storm';
   if (value === 'precipitation') return 'Precipitation';
   return 'Other';
+}
+
+function reviewVerdictToneClass(verdict: PaperAfterActionReview['verdict']) {
+  if (verdict === 'excellent' || verdict === 'solid') return 'tone-good';
+  if (verdict === 'mixed') return 'tone-warn';
+  return 'tone-bad';
+}
+
+function reviewVerdictTextClass(verdict: PaperAfterActionReview['verdict']) {
+  if (verdict === 'excellent' || verdict === 'solid') return 'positive';
+  if (verdict === 'needs-work') return 'negative';
+  return undefined;
 }
 
 export default App;

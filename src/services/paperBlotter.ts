@@ -87,6 +87,21 @@ export type PaperPerformanceSummary = {
   lastClosedAt: string | null;
 };
 
+export type PaperAfterActionReview = {
+  marketId: string;
+  marketTitle: string;
+  outcome: PaperBlotterEntry['outcome'];
+  verdict: 'excellent' | 'solid' | 'mixed' | 'needs-work';
+  score: number;
+  headline: string;
+  summary: string;
+  why: string[];
+  refineNextTime: string[];
+  strengths: string[];
+  warnings: string[];
+  timeline: { label: string; detail: string; at: string | null }[];
+};
+
 const STORAGE_KEY = 'weather-markets-paper-blotter:v1';
 const MAX_JOURNAL = 18;
 
@@ -587,5 +602,121 @@ export function summarizePaperPerformance(blotter: Record<string, PaperBlotterEn
       lessons: buildLessons(totals, bySetupType, byEdgeBucket),
     },
     lastClosedAt,
+  };
+}
+
+function verdictFor(score: number): PaperAfterActionReview['verdict'] {
+  if (score >= 80) return 'excellent';
+  if (score >= 65) return 'solid';
+  if (score >= 45) return 'mixed';
+  return 'needs-work';
+}
+
+function headlineFor(entry: PaperBlotterEntry, verdict: PaperAfterActionReview['verdict']) {
+  if (entry.outcome === 'win') return verdict === 'excellent' ? 'Thesis held and execution captured it.' : 'Good winner, worth repeating with discipline.';
+  if (entry.outcome === 'loss') return 'Loss review, isolate whether the thesis broke or the entry was poor.';
+  if (entry.outcome === 'flat') return 'Flat trade, timing and follow-through need a closer look.';
+  if (entry.outcome === 'queued') return 'Queued trade, review readiness before activating.';
+  return 'Open trade, monitor whether the original reason still holds.';
+}
+
+export function buildPaperAfterActionReview(entry: PaperBlotterEntry): PaperAfterActionReview {
+  let score = 50;
+  const why: string[] = [];
+  const refineNextTime: string[] = [];
+  const strengths: string[] = [];
+  const warnings: string[] = [];
+
+  const realized = entry.realizedPnlPoints ?? entry.pnlPoints ?? 0;
+  const edgeChange = entry.currentEdge - entry.entryEdge;
+  const confidenceChange = entry.currentConfidence - entry.entryConfidence;
+  const hasExitSignal = entry.exitSuggestion.shouldClose;
+
+  if (entry.outcome === 'win') {
+    score += 22;
+    why.push(`The trade finished green at ${Math.round(realized * 100)} pts, so the position captured real edge instead of only looking good on entry.`);
+  } else if (entry.outcome === 'loss') {
+    score -= 18;
+    why.push(`The trade finished down ${Math.abs(Math.round(realized * 100))} pts, so something in thesis quality, timing, or risk discipline needs tightening.`);
+  } else if (entry.outcome === 'flat') {
+    why.push('The trade went nowhere after entry, which usually means fair value was already close or the catalyst never really arrived.');
+  }
+
+  if (Math.abs(entry.entryEdge) >= 0.1) {
+    score += 10;
+    strengths.push(`Entry edge was substantial at ${Math.round(entry.entryEdge * 100)} pts.`);
+    why.push('The scanner had a meaningful pricing gap at entry, which is the right raw material for a worthwhile trade.');
+  } else if (Math.abs(entry.entryEdge) < 0.06) {
+    score -= 8;
+    warnings.push(`Entry edge was only ${Math.round(entry.entryEdge * 100)} pts.`);
+    refineNextTime.push('Be more selective on thin-edge trades, especially when the board is already close to fair value.');
+  }
+
+  if (edgeChange > 0.03) {
+    score += 8;
+    strengths.push(`Edge improved by ${Math.round(edgeChange * 100)} pts after entry.`);
+    why.push('The market moved further toward the thesis after entry, which is a sign the read improved with time.');
+  } else if (edgeChange < -0.03) {
+    score -= 10;
+    warnings.push(`Edge faded by ${Math.abs(Math.round(edgeChange * 100))} pts after entry.`);
+    refineNextTime.push('Re-check faster when the edge compresses by 3+ pts, because the market may have caught up before the thesis played out.');
+  }
+
+  if (confidenceChange >= 0.05) {
+    score += 6;
+    strengths.push(`Forecast confidence improved from ${Math.round(entry.entryConfidence * 100)}% to ${Math.round(entry.currentConfidence * 100)}%.`);
+  } else if (confidenceChange <= -0.05) {
+    score -= 7;
+    warnings.push(`Forecast confidence slipped from ${Math.round(entry.entryConfidence * 100)}% to ${Math.round(entry.currentConfidence * 100)}%.`);
+    refineNextTime.push('Cut faster when forecast confidence deteriorates, even before the hard stop is hit.');
+  }
+
+  if (entry.state === 'closed' && hasExitSignal) {
+    score += entry.exitSuggestion.reason === 'take-profit' ? 8 : entry.exitSuggestion.reason === 'stop-loss' ? 2 : 0;
+    why.push(`The final close aligned with the desk rule: ${entry.exitSuggestion.summary}`);
+  } else if (entry.state === 'active' && hasExitSignal) {
+    score -= 6;
+    warnings.push('The review engine is already signaling a close, but the trade is still marked active.');
+    refineNextTime.push('When the review engine flips to close, either exit or write down a specific override reason.');
+  }
+
+  if (!refineNextTime.length) {
+    refineNextTime.push(entry.outcome === 'win'
+      ? 'Keep the same setup, but document the exact entry conditions so you can repeat them deliberately.'
+      : 'Write one sentence on what had to be true for this trade to work, then test whether that condition actually improved after entry.');
+  }
+
+  if (!strengths.length) strengths.push('The trade is at least being tracked with entry, mark, and thesis snapshots, which makes honest review possible.');
+  if (!warnings.length && entry.outcome !== 'win') warnings.push('There is no single glaring failure signal, so focus on timing, catalyst clarity, and whether the initial edge was actually actionable.');
+
+  score = Math.max(0, Math.min(100, score));
+  const verdict = verdictFor(score);
+
+  return {
+    marketId: entry.marketId,
+    marketTitle: entry.marketTitle,
+    outcome: entry.outcome,
+    verdict,
+    score,
+    headline: headlineFor(entry, verdict),
+    summary: entry.outcome === 'win'
+      ? 'This was a good trade if the gain came from a real edge that persisted, not just random tape noise.'
+      : entry.outcome === 'loss'
+        ? 'Treat this as a process review, not just a red number. The key question is whether the thesis degraded or you paid too much for it.'
+        : entry.outcome === 'flat'
+          ? 'Flat outcomes are useful because they expose trades that looked exciting but never developed enough asymmetry.'
+          : entry.outcome === 'queued'
+            ? 'Queued trades should be judged on readiness and selectivity before they become risk.'
+            : 'Keep checking whether the current tape still matches the original thesis snapshot.',
+    why: why.slice(0, 4),
+    refineNextTime: refineNextTime.slice(0, 4),
+    strengths: strengths.slice(0, 3),
+    warnings: warnings.slice(0, 3),
+    timeline: [
+      { label: 'Queued', detail: entry.queuedAt ? 'Trade entered the paper queue.' : 'Not queued.', at: entry.queuedAt },
+      { label: 'Activated', detail: entry.activatedAt ? `Active near ${entry.entryPrice === null ? '--' : `${Math.round(entry.entryPrice * 100)}%`}.` : 'Never marked active.', at: entry.activatedAt },
+      { label: 'Latest mark', detail: entry.currentMark === null ? 'No current mark saved.' : `Latest mark ${Math.round(entry.currentMark * 100)}%, current edge ${Math.round(entry.currentEdge * 100)} pts.`, at: entry.lastMarkedAt },
+      { label: 'Closed', detail: entry.closedAt ? `Closed near ${entry.closePrice === null ? '--' : `${Math.round(entry.closePrice * 100)}%`} with ${entry.realizedPnlPoints === null ? '--' : `${entry.realizedPnlPoints >= 0 ? '+' : ''}${Math.round(entry.realizedPnlPoints * 100)} pts`}.` : 'Still open.', at: entry.closedAt },
+    ],
   };
 }
