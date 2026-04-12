@@ -39,6 +39,14 @@ const formatClock = (iso?: string) => {
 type MarketStatus = 'live' | 'watch' | 'stale' | 'cold';
 type AlertTone = 'good' | 'warn' | 'bad';
 type AlertKind = 'edge' | 'confidence' | 'spread' | 'freshness' | 'status' | 'quote' | 'regime';
+type RegimePresetId = 'fast' | 'balanced' | 'slow';
+
+type RegimePreset = {
+  id: RegimePresetId;
+  label: string;
+  description: string;
+  tuning: WatcherRegimeTuning;
+};
 
 type MarketAlert = {
   id: string;
@@ -99,6 +107,54 @@ const loadRegimeTuning = (): WatcherRegimeTuning => {
 };
 
 const tuningThresholdLabel = (value: number) => `${Math.round(value * 100)} pts`;
+
+const REGIME_PRESETS: RegimePreset[] = [
+  {
+    id: 'fast',
+    label: 'Fast',
+    description: 'More reactive, catches noisier flips sooner.',
+    tuning: {
+      windowSize: 4,
+      flipRiskMinFlips: 1,
+      qualityDropThreshold: 0.12,
+      qualityRiseThreshold: 0.12,
+      freshnessPenaltyMin: 0,
+      requireMonotonicQuality: false,
+    },
+  },
+  {
+    id: 'balanced',
+    label: 'Balanced',
+    description: 'Default local setting for everyday monitoring.',
+    tuning: DEFAULT_WATCHER_REGIME_TUNING,
+  },
+  {
+    id: 'slow',
+    label: 'Slow',
+    description: 'Needs more confirmation before flagging a regime.',
+    tuning: {
+      windowSize: 9,
+      flipRiskMinFlips: 3,
+      qualityDropThreshold: 0.24,
+      qualityRiseThreshold: 0.24,
+      freshnessPenaltyMin: 30,
+      requireMonotonicQuality: true,
+    },
+  },
+];
+
+const tuningMatches = (left: WatcherRegimeTuning, right: WatcherRegimeTuning) => (
+  left.windowSize === right.windowSize
+  && left.flipRiskMinFlips === right.flipRiskMinFlips
+  && left.qualityDropThreshold === right.qualityDropThreshold
+  && left.qualityRiseThreshold === right.qualityRiseThreshold
+  && left.freshnessPenaltyMin === right.freshnessPenaltyMin
+  && left.requireMonotonicQuality === right.requireMonotonicQuality
+);
+
+const getActiveRegimePreset = (tuning: WatcherRegimeTuning) => (
+  REGIME_PRESETS.find((preset) => tuningMatches(preset.tuning, tuning)) ?? null
+);
 
 const toneForAlert = (kind: AlertKind, magnitude: number): AlertTone => {
   if (kind === 'freshness' || kind === 'status') return magnitude >= 1 ? 'warn' : 'bad';
@@ -409,12 +465,20 @@ function App() {
   const deterioratingCount = markets.filter((market) => (marketDeltas[market.id]?.freshnessDelta ?? 0) >= 20).length;
   const actionCount = allAlerts.filter((alert) => alert.tone !== 'bad').length;
 
+  const activeRegimePreset = useMemo(() => getActiveRegimePreset(regimeTuning), [regimeTuning]);
+
   const updateRegimeTuning = <K extends keyof WatcherRegimeTuning>(key: K, value: WatcherRegimeTuning[K]) => {
     setRegimeTuning((current) => ({ ...current, [key]: value }));
   };
 
+  const applyRegimePreset = (presetId: RegimePresetId) => {
+    const preset = REGIME_PRESETS.find((item) => item.id === presetId);
+    if (!preset) return;
+    setRegimeTuning({ ...preset.tuning });
+  };
+
   const resetRegimeTuning = () => {
-    setRegimeTuning(DEFAULT_WATCHER_REGIME_TUNING);
+    applyRegimePreset('balanced');
   };
 
   const toggleWatch = (marketId: string) => {
@@ -481,6 +545,30 @@ function App() {
               <button className="watch-toggle" onClick={resetRegimeTuning}>Reset</button>
             </div>
             <span className="subtle">Changes only affect this browser's watcher summary, history, and alerts.</span>
+            <div className="tuning-presets" role="group" aria-label="Watcher regime presets">
+              {REGIME_PRESETS.map((preset) => {
+                const active = activeRegimePreset?.id === preset.id;
+                return (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    className={`tuning-preset-button ${active ? 'active' : ''}`}
+                    onClick={() => applyRegimePreset(preset.id)}
+                  >
+                    <span className="tuning-preset-copy">
+                      <strong>{preset.label}</strong>
+                      <small>{preset.description}</small>
+                    </span>
+                    <span className={`status-chip ${active ? 'tone-good' : 'tone-muted'}`}>{active ? 'Active' : 'Preset'}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="tuning-active-indicator">
+              <span className="summary-label">Preset state</span>
+              <strong>{activeRegimePreset ? activeRegimePreset.label : 'Custom'}</strong>
+              <span className="subtle">{activeRegimePreset ? `${activeRegimePreset.description} Manual edits will switch this to Custom.` : 'Manual override is active for this browser only.'}</span>
+            </div>
             <div className="tuning-grid">
               <label>
                 <span>Window</span>
