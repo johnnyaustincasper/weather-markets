@@ -326,7 +326,7 @@ function App() {
 
   const selectedTrend = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? summarizeMarketTrend(selectedMarket.id) : null, [selectedMarket, historyTick]);
   const selectedHistory = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
-  const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 4), [selectedHistory]);
+  const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
 
   useEffect(() => {
     setPaperBlotter(syncPaperBlotter(displayMarkets, paperState, paperPlans, paperExecutionProfile));
@@ -345,7 +345,7 @@ function App() {
       : refreshing
         ? 'Refreshing market odds and model odds now.'
         : showingFallbackFirst || meta?.usedCuratedFallback
-          ? 'No strong live contract made the board, so the app is leading with clearly labeled WATCHLIST SETUP candidates until better live listings appear.'
+          ? 'No strong live contract made the board, so command is leading with clearly labeled watchlist scenarios until a better live listing appears.'
           : 'Live scan online. Market odds are being compared against current weather-model odds.';
 
   const toggleWatch = (marketId: string) => {
@@ -412,170 +412,139 @@ function App() {
     : null;
 
   return (
-    <div className="app-shell">
-      <div className="ambient ambient-left" />
-      <div className="ambient ambient-right" />
-      <main className="dashboard simple-dashboard">
-        <section className="hero panel compact-hero">
-          <div>
-            <p className="eyebrow">Weather market trade finder</p>
-            <h1>Find weather trades where market odds and model odds disagree.</h1>
-            <p className="subtle hero-copy">
-              The app does three things: scans weather prediction markets, compares market price vs model price, and lets you paper trade the best setups.
-            </p>
-            <div className="hero-steps">
-              <div className="hero-step"><strong>1</strong><span>Scan live contracts</span></div>
-              <div className="hero-step"><strong>2</strong><span>Rank the biggest pricing gaps</span></div>
-              <div className="hero-step"><strong>3</strong><span>Paper trade the cleanest ideas</span></div>
+    <div className="command-app-shell">
+      <div className="grid-haze grid-haze-left" />
+      <div className="grid-haze grid-haze-right" />
+      <main className="command-deck">
+        <section className="panel mission-hero">
+          <div className="hero-callout">
+            <div className="eyebrow-row">
+              <p className="eyebrow">WX-2060 strategic command deck</p>
+              <span className={`status-pill ${error ? 'tone-bad' : showingFallbackFirst || meta?.usedCuratedFallback ? 'tone-warn' : 'tone-good'}`}>{error ? 'Feed degraded' : showingFallbackFirst || meta?.usedCuratedFallback ? 'Scenario-first mode' : 'Live tactical mode'}</span>
             </div>
-            <div className="hero-status-row">
-              <span className={`badge ${error ? 'tone-bad' : showingFallbackFirst || meta?.usedCuratedFallback ? 'tone-warn' : 'tone-good'}`}>{error ? 'Scanner offline' : showingFallbackFirst || meta?.usedCuratedFallback ? 'Fallback-first board' : 'Live board'}</span>
+            <h1>Map weather-market campaigns like an operator, not a spreadsheet.</h1>
+            <p className="hero-copy subtle">This deck scans live weather contracts, compares exchange pricing against weather models, and lets you develop full paper-trade plans with execution controls, change tracking, and scenario discipline.</p>
+            <div className="hero-ribbon">
               <span className="badge soft">Last scan {formatClock(lastScanAt || meta?.refreshedAt)}</span>
-              <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} live contracts found` : 'Building trade list'}</span>
+              <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} live contracts on scope` : 'Building scope'}</span>
+              <span className="badge soft">Sources {meta?.weatherSourceMix.join(' · ') ?? 'Live feeds'}</span>
             </div>
-            <p className="subtle hero-status-copy">{scanState}</p>
+            <p className="hero-status subtle">{scanState}</p>
           </div>
-          <div className="hero-metrics focus-metrics">
-            <Metric label="Best setups now" value={String(liveTradeCount).padStart(2, '0')} positive={liveTradeCount > 0} />
-            <Metric label="Watchlist ideas" value={String(watchCount).padStart(2, '0')} positive={watchCount > 0} />
-            <Metric label="Top edge" value={topTrade ? signedPct(topTrade.edge) : '--'} positive={(topTrade?.edge ?? 0) >= 0} />
-            <Metric label="Paper trades live" value={String(paperQueueCount).padStart(2, '0')} positive={paperQueueCount > 0} />
+          <div className="hero-rail">
+            <Metric label="Strike-ready setups" value={String(liveTradeCount).padStart(2, '0')} positive={liveTradeCount > 0} />
+            <Metric label="Scenario watchpoints" value={String(watchCount).padStart(2, '0')} positive={watchCount > 0} />
+            <Metric label="Lead edge" value={topTrade ? signedPct(topTrade.edge) : '--'} positive={(topTrade?.edge ?? 0) >= 0} />
+            <Metric label="Open paper missions" value={String(paperQueueCount).padStart(2, '0')} positive={paperQueueCount > 0} />
           </div>
         </section>
 
-        {error && <section className="panel error-panel"><strong>Unable to rank trades right now.</strong><span>{error}</span></section>}
-        {loading && <section className="panel loading-panel"><strong>Building trade list…</strong><span>Pulling contracts, quotes, and weather inputs.</span></section>}
+        {error && <section className="panel system-banner tone-bad"><strong>System advisory</strong><span>{error}</span></section>}
+        {loading && <section className="panel system-banner"><strong>Mission board loading</strong><span>Pulling contracts, quotes, and weather-model inputs.</span></section>}
 
-        <section className="content-grid core-layout">
-          <section className="panel table-panel">
+        <section className="operations-grid">
+          <section className="panel theater-panel">
             <div className="panel-header">
               <div>
-                <p className="eyebrow">Core trade list</p>
-                <h2>Best weather trades right now</h2>
-                <p className="subtle panel-intro">Rows are brutally labeled. LIVE CONTRACT means a real exchange listing. WATCHLIST SETUP means a fallback candidate to monitor until a real listing appears.</p>
+                <p className="eyebrow">Operational theater</p>
+                <h2>Mission board</h2>
+                <p className="subtle panel-intro">Each tile is a deployable situation card. Live contracts stay separate from watchlist scenarios so planning stays honest.</p>
               </div>
               <div className="table-actions">
-                <span className="badge">{meta?.weatherSourceMix.join(' · ') ?? 'Live feeds'}</span>
-                <button className="refresh-button" onClick={() => void fetchMarkets(true)} disabled={loading || refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>
+                <button className="command-button" onClick={() => void fetchMarkets(true)} disabled={loading || refreshing}>{refreshing ? 'Refreshing…' : 'Refresh board'}</button>
               </div>
             </div>
 
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Trade</th>
-                    <th>Type</th>
-                    <th>Market</th>
-                    <th>Model</th>
-                    <th>Edge</th>
-                    <th>Action</th>
-                    <th>Freshness</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayMarkets.map((market) => {
-                    const plan = paperPlans[market.id];
-                    const delta = marketDeltas[market.id];
-                    const watched = watchSet.has(market.id);
-                    return (
-                      <tr key={market.id} className={market.id === selectedMarket?.id ? 'active-row' : ''} onClick={() => setSelectedId(market.id)}>
-                        <td>
-                          <div className="market-cell">
-                            <strong>{market.title}</strong>
-                            <span>{market.location} · {market.expiry}</span>
-                            <div className="inline-flags">
-                              <span className={`status-chip ${statusToneClass(delta.status)}`}>{statusLabel(delta.status)}</span>
-                              {watched && <span className="status-chip tone-muted">Watching</span>}
-                            </div>
-                          </div>
-                        </td>
-                        <td>
-                          <div className="market-type-cell">
-                            <span className={`status-chip ${market.dataOrigin === 'curated-watchlist' ? 'tone-warn' : 'tone-good'}`}>{market.dataOrigin === 'curated-watchlist' ? 'WATCHLIST SETUP' : 'LIVE CONTRACT'}</span>
-                            <small>{market.dataOrigin === 'curated-watchlist' ? 'Not tradeable yet' : 'Real listed market'}</small>
-                          </div>
-                        </td>
-                        <td>{market.dataOrigin === 'curated-watchlist' ? '--' : pct(market.impliedProbability)}</td>
-                        <td>{pct(market.modelProbability)}</td>
-                        <td>
-                          <div className="delta-cell">
-                            <span className={market.edge >= 0 ? 'positive' : 'negative'}>{signedPct(market.edge)}</span>
-                            <small className={delta.edgeDelta >= 0 ? 'positive' : 'negative'}>{previousMarkets[market.id] ? signedPct(delta.edgeDelta) : 'New'}</small>
-                          </div>
-                        </td>
-                        <td>
-                          <span className={`status-chip ${market.dataOrigin === 'curated-watchlist' ? 'tone-warn' : paperDecisionToneClass(plan.decision)}`}>{market.dataOrigin === 'curated-watchlist' ? 'Watchlist only' : paperDecisionLabel(plan.decision)}</span>
-                        </td>
-                        <td>{freshnessLabel(market.freshnessMinutes)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+            <div className="theater-grid">
+              {displayMarkets.map((market, index) => {
+                const plan = paperPlans[market.id];
+                const delta = marketDeltas[market.id];
+                const watched = watchSet.has(market.id);
+                const selected = market.id === selectedMarket?.id;
+                return (
+                  <button key={market.id} type="button" className={`theater-card ${selected ? 'selected' : ''}`} onClick={() => setSelectedId(market.id)}>
+                    <div className="theater-card-topline">
+                      <span className="sector-label">Sector {String(index + 1).padStart(2, '0')}</span>
+                      <span className={`status-pill ${statusToneClass(delta.status)}`}>{statusLabel(delta.status)}</span>
+                    </div>
+                    <strong>{market.title}</strong>
+                    <p>{market.location} · {market.expiry}</p>
+                    <div className="signal-strip">
+                      <SignalCell label="Market" value={market.dataOrigin === 'curated-watchlist' ? '--' : pct(market.impliedProbability)} />
+                      <SignalCell label="Model" value={pct(market.modelProbability)} />
+                      <SignalCell label="Edge" value={signedPct(market.edge)} tone={market.edge >= 0 ? 'positive' : 'negative'} />
+                      <SignalCell label="Fresh" value={freshnessLabel(market.freshnessMinutes)} />
+                    </div>
+                    <div className="card-footer-row">
+                      <span className={`status-pill ${market.dataOrigin === 'curated-watchlist' ? 'tone-warn' : 'tone-good'}`}>{market.dataOrigin === 'curated-watchlist' ? 'Scenario only' : 'Live contract'}</span>
+                      <span className={`status-pill ${paperDecisionToneClass(plan.decision)}`}>{market.dataOrigin === 'curated-watchlist' ? 'Observe' : paperDecisionLabel(plan.decision)}</span>
+                      {watched && <span className="status-pill tone-muted">Pinned</span>}
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           </section>
 
-          <div className="detail-stack">
-            <section className="panel detail-panel">
+          <div className="right-column">
+            <section className="panel command-panel">
               <div className="panel-header">
                 <div>
-                  <p className="eyebrow">Selected trade</p>
-                  <h2>{selectedMarket?.title ?? 'Select a trade'}</h2>
-                  <p className="subtle panel-intro">A plain-English view of why this row matters, with very clear separation between live contracts and fallback watchlist setups.</p>
+                  <p className="eyebrow">Command brief</p>
+                  <h2>{selectedMarket?.title ?? 'Awaiting selection'}</h2>
+                  <p className="subtle panel-intro">Central planning surface for thesis, execution state, risks, and paper-order control.</p>
                 </div>
                 {selectedMarket && (
-                  <button className={`watch-toggle ${watchSet.has(selectedMarket.id) ? 'active' : ''}`} onClick={() => toggleWatch(selectedMarket.id)}>
-                    {watchSet.has(selectedMarket.id) ? 'Watching' : 'Watch'}
+                  <button className={`command-button ${watchSet.has(selectedMarket.id) ? 'active' : ''}`} onClick={() => toggleWatch(selectedMarket.id)}>
+                    {watchSet.has(selectedMarket.id) ? 'Pinned to board' : 'Pin to board'}
                   </button>
                 )}
               </div>
 
               {selectedMarket && selectedPlan && selectedDelta && (
                 <>
-                  <div className="detail-metrics trade-metrics">
-                    <Metric label="Row type" value={selectedMarket.dataOrigin === 'curated-watchlist' ? 'WATCHLIST SETUP' : 'LIVE CONTRACT'} positive={selectedMarket.dataOrigin !== 'curated-watchlist'} />
-                    <Metric label="Market odds" value={selectedMarket.dataOrigin === 'curated-watchlist' ? '--' : pct(selectedMarket.impliedProbability)} />
-                    <Metric label="Model odds" value={pct(selectedMarket.modelProbability)} />
-                    <Metric label="Edge" value={signedPct(selectedMarket.edge)} positive={selectedMarket.edge >= 0} />
-                    <Metric label="Paper action" value={selectedMarket.dataOrigin === 'curated-watchlist' ? 'Watchlist only' : paperDecisionLabel(selectedPlan.decision)} positive={selectedPlan.decision === 'would-trade'} />
+                  <div className="command-summary-grid">
+                    <Metric label="Contract status" value={selectedMarket.dataOrigin === 'curated-watchlist' ? 'SCENARIO' : 'LIVE'} positive={selectedMarket.dataOrigin !== 'curated-watchlist'} />
+                    <Metric label="Action lane" value={selectedMarket.dataOrigin === 'curated-watchlist' ? 'Observe' : paperDirectionLabel(selectedPlan.direction)} positive={selectedPlan.direction !== 'stand-aside'} />
+                    <Metric label="Confidence" value={pct(selectedMarket.confidence)} positive={selectedMarket.confidence >= 0.6} />
+                    <Metric label="Quote posture" value={selectedMarket.quoteStatus.toUpperCase()} positive={selectedMarket.quoteStatus === 'tight' || selectedMarket.quoteStatus === 'tradable'} />
                   </div>
 
-                  <div className="operator-grid simple-cards">
-                    <ActionCard title="Trade direction" body={selectedMarket.dataOrigin === 'curated-watchlist' ? 'Wait for live listing' : paperDirectionLabel(selectedPlan.direction)} emphasis />
-                    <ActionCard title="Why it matters" body={selectedPlan.thesis} />
-                    <ActionCard title="Entry" body={selectedPlan.entryTrigger} />
-                    <ActionCard title="Exit" body={selectedPlan.stopTrigger} />
+                  <div className="doctrine-grid">
+                    <ActionCard title="Operational thesis" body={selectedPlan.thesis} emphasis />
+                    <ActionCard title="Entry trigger" body={selectedPlan.entryTrigger} />
+                    <ActionCard title="Abort / stop" body={selectedPlan.stopTrigger} />
+                    <ActionCard title="Heuristic read" body={selectedMarket.heuristicSummary} />
                   </div>
 
-                  <div className="checklist-grid">
-                    <div className="checklist-card">
-                      <span className="detail-label">Why it ranks here</span>
+                  <div className="intel-grid">
+                    <div className="intel-card">
+                      <span className="detail-label">Go / no-go checks</span>
                       <ul>
                         {selectedPlan.entryCriteria.map((item) => (
                           <li key={item.label} className={item.passed ? 'positive' : 'negative'}>{item.label}: {item.value}</li>
                         ))}
                       </ul>
                     </div>
-                    <div className="checklist-card">
-                      <span className="detail-label">What could kill the trade</span>
+                    <div className="intel-card">
+                      <span className="detail-label">Threats to plan</span>
                       <ul>
                         {(selectedPlan.blockers.length ? selectedPlan.blockers : selectedPlan.exitCriteria).slice(0, 5).map((item) => <li key={item}>{item}</li>)}
                       </ul>
                     </div>
                   </div>
 
-                  <section className="paper-engine-panel minimal-paper-panel">
-                    <div className="paper-engine-header">
+                  <section className="execution-bay">
+                    <div className="subpanel-header">
                       <div>
-                        <span className="detail-label">Paper trading</span>
-                        <p className="subtle">Track what you would do, without sending real orders. Watchlist setups stay explicitly non-executable.</p>
+                        <span className="detail-label">Execution bay</span>
+                        <p className="subtle">Paper-only controls for staging, sizing, and repricing the selected campaign.</p>
                       </div>
                       <div className="paper-state-actions">
-                        <button className={`watch-toggle ${selectedPaperState?.state === 'flat' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'flat')}>Flat</button>
-                        <button className={`watch-toggle ${selectedPaperState?.state === 'queued' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'queued')}>Queue</button>
-                        <button className={`watch-toggle ${selectedPaperState?.state === 'active' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'active')}>Active</button>
-                        <button className={`watch-toggle ${selectedPaperState?.state === 'closed' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'closed')}>Closed</button>
+                        <button className={`command-button ${selectedPaperState?.state === 'flat' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'flat')}>Flat</button>
+                        <button className={`command-button ${selectedPaperState?.state === 'queued' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'queued')}>Queue</button>
+                        <button className={`command-button ${selectedPaperState?.state === 'active' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'active')}>Active</button>
+                        <button className={`command-button ${selectedPaperState?.state === 'closed' ? 'active' : ''}`} onClick={() => setMarketPaperState(selectedMarket.id, 'closed')}>Closed</button>
                       </div>
                     </div>
 
@@ -587,13 +556,13 @@ function App() {
                     </div>
 
                     {selectedMarket.dataOrigin !== 'curated-watchlist' && selectedPlan.direction !== 'stand-aside' && selectedOrderDraft && (
-                      <div className="checklist-card order-ticket-card">
-                        <div className="tuning-header-row">
+                      <div className="intel-card order-ticket-shell">
+                        <div className="subpanel-header">
                           <div>
-                            <span className="detail-label">Paper order ticket</span>
-                            <p className="subtle">Stage a real limit price instead of just flipping the position state.</p>
+                            <span className="detail-label">Order staging console</span>
+                            <p className="subtle">Stage working paper orders around the live mark.</p>
                           </div>
-                          <span className={`status-chip ${paperDecisionToneClass(selectedPlan.decision)}`}>{paperDirectionLabel(selectedPlan.direction)}</span>
+                          <span className={`status-pill ${paperDecisionToneClass(selectedPlan.decision)}`}>{paperDirectionLabel(selectedPlan.direction)}</span>
                         </div>
                         <div className="order-ticket-grid">
                           <label>
@@ -605,29 +574,29 @@ function App() {
                             <input type="number" min="0.01" max="0.99" step="0.01" value={selectedOrderDraft.limitPrice} onChange={(event) => updateOrderDraft(selectedMarket.id, { limitPrice: clampOrderPrice(Number(event.target.value) || 0.5) })} />
                           </label>
                           <label className="order-ticket-note">
-                            <span>Note</span>
+                            <span>Commander note</span>
                             <input type="text" value={selectedOrderDraft.note} placeholder="Why this level?" onChange={(event) => updateOrderDraft(selectedMarket.id, { note: event.target.value })} />
                           </label>
                         </div>
-                        <div className="hero-status-row">
-                          <span className="badge soft">Live mark {quotePct(selectedMarket.clobQuote?.midpoint ?? selectedMarket.impliedProbability)}</span>
+                        <div className="hero-ribbon">
+                          <span className="badge soft">Mark {quotePct(selectedMarket.clobQuote?.midpoint ?? selectedMarket.impliedProbability)}</span>
                           <span className="badge soft">Ask {quotePct(selectedMarket.clobQuote?.bestAsk)}</span>
                           <span className="badge soft">Bid {quotePct(selectedMarket.clobQuote?.bestBid)}</span>
-                          <button className="watch-toggle" onClick={handlePlacePaperOrder}>Stage order</button>
+                          <button className="command-button" onClick={handlePlacePaperOrder}>Stage order</button>
                         </div>
-                        <div className="source-list compact-orders">
+                        <div className="stack-list compact-orders">
                           {selectedOrders.length ? selectedOrders.map((order) => (
-                            <div className="source-row" key={order.id}>
+                            <div className="stack-row" key={order.id}>
                               <div>
                                 <div className="source-title-row">
                                   <strong>{order.direction === 'buy-yes' ? 'BUY YES' : 'BUY NO'} · {order.quantity}u @ {pct(order.limitPrice)}</strong>
-                                  <span className={`status-chip ${order.status === 'filled' ? 'tone-good' : order.status === 'cancelled' ? 'tone-muted' : 'tone-warn'}`}>{order.status.toUpperCase()}</span>
+                                  <span className={`status-pill ${order.status === 'filled' ? 'tone-good' : order.status === 'cancelled' ? 'tone-muted' : 'tone-warn'}`}>{order.status.toUpperCase()}</span>
                                 </div>
                                 <p>{order.note}</p>
                               </div>
                               <div className="source-metrics">
                                 <small>{formatDateTime(order.createdAt)}</small>
-                                {order.status === 'working' && <button className="watch-toggle" onClick={() => handleCancelPaperOrder(order.id)}>Cancel</button>}
+                                {order.status === 'working' && <button className="command-button" onClick={() => handleCancelPaperOrder(order.id)}>Cancel</button>}
                               </div>
                             </div>
                           )) : <p className="subtle">No paper orders staged yet for this contract.</p>}
@@ -635,15 +604,15 @@ function App() {
                       </div>
                     )}
 
-                    <div className="mini-settings-row">
+                    <div className="support-grid">
                       <PaperExecutionSettingsForm settings={paperExecutionProfile.global} onChange={updateGlobalPaperSetting} compact />
-                      <div className="checklist-card">
-                        <div className="tuning-header-row">
+                      <div className="intel-card">
+                        <div className="subpanel-header">
                           <div>
-                            <span className="detail-label">Paper blotter</span>
-                            <p className="subtle">Local journal for this browser only.</p>
+                            <span className="detail-label">Blotter state</span>
+                            <p className="subtle">Local campaign journal for this browser.</p>
                           </div>
-                          <button className="watch-toggle" onClick={handleRepricePaperBlotter}>Reprice</button>
+                          <button className="command-button" onClick={handleRepricePaperBlotter}>Reprice</button>
                         </div>
                         {paperRepriceMeta && <p className="subtle">Last repriced {formatClock(paperRepriceMeta.at)} for {paperRepriceMeta.changedCount} positions.</p>}
                         {selectedBlotter ? (
@@ -663,81 +632,80 @@ function App() {
               )}
             </section>
 
-            <section className="panel history-panel">
+            <section className="panel telemetry-panel">
               <div className="panel-header">
                 <div>
-                  <p className="eyebrow">Recent changes</p>
-                  <h2>What moved on this trade</h2>
+                  <p className="eyebrow">Telemetry</p>
+                  <h2>Recent movement and board alerts</h2>
                 </div>
                 <div className="table-actions">
                   <span className="badge soft">{selectedTrend?.snapshotCount ?? 0} snapshots</span>
-                  <span className={`badge soft ${selectedMarket ? quoteToneClass(selectedMarket.quoteStatus) : ''}`}>{selectedMarket?.dataOrigin === 'curated-watchlist' ? 'WATCHLIST ONLY' : selectedMarket?.quoteStatus?.toUpperCase() ?? 'NO QUOTE'}</span>
+                  <span className={`badge soft ${selectedMarket ? quoteToneClass(selectedMarket.quoteStatus) : ''}`}>{selectedMarket?.dataOrigin === 'curated-watchlist' ? 'SCENARIO ONLY' : selectedMarket?.quoteStatus?.toUpperCase() ?? 'NO QUOTE'}</span>
                 </div>
               </div>
+
               {selectedMarket && (
-                <div className="execution-summary-grid">
+                <div className="execution-summary-grid telemetry-metrics">
                   <ExecutionSummaryCard label="Edge change" value={selectedTrend?.edge.delta == null ? '--' : signedPct(selectedTrend.edge.delta)} detail={`Now ${signedPct(selectedMarket.edge)}`} toneClass={selectedTrend?.edge.delta == null ? undefined : selectedTrend.edge.delta >= 0 ? 'positive' : 'negative'} />
                   <ExecutionSummaryCard label="Confidence change" value={selectedTrend?.confidence.delta == null ? '--' : signedPct(selectedTrend.confidence.delta)} detail={`Now ${pct(selectedMarket.confidence)}`} toneClass={selectedTrend?.confidence.delta == null ? undefined : selectedTrend.confidence.delta >= 0 ? 'positive' : 'negative'} />
                   <ExecutionSummaryCard label="Freshness" value={freshnessLabel(selectedMarket.freshnessMinutes)} detail={selectedTrend?.freshness.delta == null ? 'Need another refresh' : `${selectedTrend.freshness.delta >= 0 ? '+' : ''}${selectedTrend.freshness.delta}m vs first local snapshot`} />
-                  <ExecutionSummaryCard label="Spread" value={pct(selectedMarket.disagreement)} detail={selectedMarket.heuristicSummary} />
+                  <ExecutionSummaryCard label="Spread / disagreement" value={pct(selectedMarket.disagreement)} detail={selectedMarket.heuristicSummary} />
                 </div>
               )}
-              <div className="history-list compact-history">
-                {selectedMarket?.dataOrigin === 'curated-watchlist'
-                  ? <p className="subtle">This row is a fallback watchlist setup, so there is no live contract history yet.</p>
-                  : historyPreview.length ? historyPreview.map((snapshot, index) => <HistoryRow key={`${snapshot.capturedAt}-${index}`} snapshot={snapshot} />) : <p className="subtle">History appears after another refresh.</p>}
+
+              <div className="telemetry-lanes">
+                <div className="intel-card">
+                  <span className="detail-label">History tape</span>
+                  <div className="stack-list compact-history">
+                    {selectedMarket?.dataOrigin === 'curated-watchlist'
+                      ? <p className="subtle">This row is a planning scenario, so there is no live contract history yet.</p>
+                      : historyPreview.length ? historyPreview.map((snapshot, index) => <HistoryRow key={`${snapshot.capturedAt}-${index}`} snapshot={snapshot} />) : <p className="subtle">History appears after another refresh.</p>}
+                  </div>
+                </div>
+                <div className="intel-card">
+                  <span className="detail-label">Signal traffic</span>
+                  <div className="stack-list">
+                    {allAlerts.length ? allAlerts.map((alert) => (
+                      <div className="stack-row" key={alert.id}>
+                        <div>
+                          <div className="source-title-row">
+                            <strong>{alert.marketTitle}</strong>
+                            <span className={`status-pill tone-${alert.tone}`}>{alert.summary}</span>
+                          </div>
+                          <p>{alert.detail}</p>
+                        </div>
+                        <div className="source-metrics">
+                          <small>{formatDateTime(alert.createdAt)}</small>
+                        </div>
+                      </div>
+                    )) : <p className="subtle">No alerts yet. The next refresh will show what changed.</p>}
+                  </div>
+                </div>
               </div>
             </section>
           </div>
         </section>
 
-        <section className="summary-grid summary-grid-wide bottom-strip">
+        <section className="footer-strip">
           <div className="panel summary-card">
-            <span className="summary-label">Top setup now</span>
+            <span className="summary-label">Primary objective</span>
             <strong>{topTrade?.title ?? 'Waiting for scan'}</strong>
-            <span className="subtle">{topTrade ? `${topTrade.dataOrigin === 'curated-watchlist' ? 'WATCHLIST SETUP' : 'LIVE CONTRACT'} · ${signedPct(topTrade.edge)} edge, ${pct(topTrade.confidence)} confidence.` : 'The first scan is still loading.'}</span>
+            <span className="subtle">{topTrade ? `${topTrade.dataOrigin === 'curated-watchlist' ? 'Scenario only' : 'Live contract'} · ${signedPct(topTrade.edge)} edge · ${pct(topTrade.confidence)} confidence.` : 'The first scan is still loading.'}</span>
           </div>
           <div className="panel summary-card">
-            <span className="summary-label">Scanner alerts</span>
-            <strong>{allAlerts.length} recent changes</strong>
-            <span className="subtle">{allAlerts[0]?.detail ?? 'Alerts appear once the app can compare one scan against the next.'}</span>
+            <span className="summary-label">Signal volume</span>
+            <strong>{allAlerts.length} recent alerts</strong>
+            <span className="subtle">{allAlerts[0]?.detail ?? 'Alerts appear once scans can be compared.'}</span>
           </div>
           <div className="panel summary-card">
-            <span className="summary-label">Working paper orders</span>
+            <span className="summary-label">Working tickets</span>
             <strong>{Object.values(paperOrders).flat().filter((order) => order.status === 'working').length} staged</strong>
             <span className="subtle">{Object.values(paperOrders).flat().find((order) => order.status === 'working')?.marketTitle ?? 'No active paper orders waiting in the book.'}</span>
           </div>
           <div className="panel summary-card">
-            <span className="summary-label">Market coverage</span>
+            <span className="summary-label">Coverage</span>
             <strong>{meta ? `${meta.livePolymarketEventCount} events scanned` : 'Scanning now'}</strong>
             <span className="subtle">{meta ? `${meta.totalPolymarketMarketsScanned} total markets checked.` : 'Connecting to live feeds.'}</span>
-          </div>
-        </section>
-
-        <section className="panel comparison-panel alerts-panel">
-          <div className="panel-header">
-            <div>
-              <p className="eyebrow">Board changes</p>
-              <h2>Latest scanner alerts</h2>
-            </div>
-          </div>
-          <div className="source-list">
-            {allAlerts.length ? allAlerts.map((alert) => (
-              <div className="source-row" key={alert.id}>
-                <div>
-                  <div className="source-title-row">
-                    <strong>{alert.marketTitle}</strong>
-                    <span className={`status-chip tone-${alert.tone}`}>{alert.summary}</span>
-                  </div>
-                  <p>{alert.detail}</p>
-                </div>
-                <div className="source-metrics">
-                  <small>{formatDateTime(alert.createdAt)}</small>
-                </div>
-              </div>
-            )) : (
-              <div className="source-row"><p className="subtle">No alerts yet. The next refresh will show what changed.</p></div>
-            )}
           </div>
         </section>
       </main>
@@ -750,6 +718,15 @@ function Metric({ label, value, positive }: { label: string; value: string; posi
     <div className="metric-card">
       <span>{label}</span>
       <strong className={positive === undefined ? '' : positive ? 'positive' : 'negative'}>{value}</strong>
+    </div>
+  );
+}
+
+function SignalCell({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div className="signal-cell">
+      <span>{label}</span>
+      <strong className={tone ?? ''}>{value}</strong>
     </div>
   );
 }
@@ -805,7 +782,7 @@ function PaperExecutionSettingsForm({
 
 function HistoryRow({ snapshot }: { snapshot: MarketHistorySnapshot }) {
   return (
-    <div className="history-row">
+    <div className="stack-row history-row">
       <div>
         <strong>{formatDateTime(snapshot.capturedAt)}</strong>
         <p>Market {pct(snapshot.impliedProbability)} · Model edge {signedPct(snapshot.edge)} · Confidence {pct(snapshot.confidence)}</p>
@@ -826,9 +803,9 @@ function ExecutionSummaryCard({ label, value, detail, toneClass }: { label: stri
 }
 
 function paperDecisionLabel(decision: 'would-trade' | 'watch' | 'no-trade') {
-  if (decision === 'would-trade') return 'Paper trade';
-  if (decision === 'watch') return 'Watch';
-  return 'Pass';
+  if (decision === 'would-trade') return 'Deploy';
+  if (decision === 'watch') return 'Monitor';
+  return 'Hold';
 }
 
 function paperDecisionToneClass(decision: 'would-trade' | 'watch' | 'no-trade') {
@@ -838,17 +815,17 @@ function paperDecisionToneClass(decision: 'would-trade' | 'watch' | 'no-trade') 
 }
 
 function paperDirectionLabel(direction: 'buy-yes' | 'buy-no' | 'stand-aside') {
-  if (direction === 'buy-yes') return 'Buy YES';
-  if (direction === 'buy-no') return 'Buy NO';
+  if (direction === 'buy-yes') return 'Bias YES';
+  if (direction === 'buy-no') return 'Bias NO';
   return 'Stand aside';
 }
 
 function statusLabel(status: MarketStatus) {
-  if (status === 'best') return 'Best setup';
-  if (status === 'watch') return 'Watch';
-  if (status === 'candidate') return 'Fallback candidate';
-  if (status === 'stale') return 'Stale';
-  return 'Skip';
+  if (status === 'best') return 'Priority alpha';
+  if (status === 'watch') return 'Watch sector';
+  if (status === 'candidate') return 'Scenario lane';
+  if (status === 'stale') return 'Signal aging';
+  return 'Low priority';
 }
 
 function statusToneClass(status: MarketStatus) {
