@@ -113,6 +113,8 @@ type WeatherDiscoveryAssessment = {
   include: boolean;
   score: number;
   reasons: string[];
+  ambiguityPenalty: number;
+  matchStrength: 'strong' | 'moderate' | 'weak';
 };
 
 const polymarketEventsUrl = 'https://gamma-api.polymarket.com/events?tag_slug=weather&limit=100&active=true&closed=false';
@@ -137,6 +139,15 @@ const WEATHER_POSITIVE_TAG_SLUGS = [
 ];
 const WEATHER_NEGATIVE_TAG_SLUGS = [
   'measles', 'pandemics', 'earthquakes', 'natural-disasters', 'natural-disaster', 'wildfire', 'wildfires',
+];
+const WEATHER_MEASUREMENT_TERMS = [
+  'temperature', 'temp', 'rainfall', 'precipitation', 'snowfall', 'snow', 'wind speed', 'wind gust', 'gust', 'heat index', 'sea ice', 'global temperature',
+];
+const WEATHER_SETTLEMENT_CUES = [
+  'at least', 'less than', 'more than', 'between', 'above', 'below', 'under', 'over', 'reach', 'reaches', 'hits', 'stays below', 'make landfall', 'forms',
+];
+const AMBIGUOUS_WEATHER_TOPIC_TERMS = [
+  'weather this summer', 'weather this year', 'climate change', 'weather event', 'storm season', 'hot summer', 'cold winter',
 ];
 const now = () => new Date();
 const clamp = (value: number, min = 0, max = 1) => Math.min(max, Math.max(min, value));
@@ -288,10 +299,24 @@ function eventTagSlugs(event: PolymarketEvent) {
   return (event.tags ?? []).map((tag) => normalizeText(tag.slug ?? tag.label ?? tag.name ?? '')).filter(Boolean);
 }
 
+function hasWeatherMeasurementCue(text: string) {
+  return WEATHER_MEASUREMENT_TERMS.some((keyword) => text.includes(normalizeText(keyword)));
+}
+
+function hasSettlementCue(text: string) {
+  return WEATHER_SETTLEMENT_CUES.some((keyword) => text.includes(normalizeText(keyword)));
+}
+
 function assessWeatherDiscovery(item: FlattenedEventMarket): WeatherDiscoveryAssessment {
   const haystack = normalizeText(`${item.market.question} ${item.market.description ?? ''} ${item.event.title} ${item.event.description ?? ''}`);
+  const titleOnly = normalizeText(`${item.market.question} ${item.event.title}`);
   const tagSlugs = eventTagSlugs(item.event);
+  const schema = parseResolutionSchema(item);
+  const hasLocation = Boolean(extractLocationLabel(`${item.market.question} ${item.event.title}`) || guessLocation(`${schema.location ?? ''} ${item.market.question} ${item.event.title}`));
+  const measurableRule = hasWeatherMeasurementCue(haystack) && hasSettlementCue(haystack);
+  const namedStormRule = /\b(hurricane|tropical storm|named storm|storm)\b/.test(haystack) && /\b(form|forms|landfall|landfalls|make landfall|made landfall)\b/.test(haystack);
   let score = 0;
+  let ambiguityPenalty = 0;
   const reasons: string[] = [];
 
   if (WEATHER_DISCOVERY_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)))) {
@@ -306,13 +331,45 @@ function assessWeatherDiscovery(item: FlattenedEventMarket): WeatherDiscoveryAss
     score += 1.8;
     reasons.push('weather tag');
   }
-  if (/\b(hurricane|tropical storm|named storm)\b/.test(haystack) && /\b(form|forms|landfall|landfalls|make landfall|made landfall)\b/.test(haystack)) {
-    score += 1.6;
+  if (namedStormRule) {
+    score += 2;
     reasons.push('storm contract wording');
   }
-  if (/\b(temperature|rainfall|precipitation|snowfall|wind|gust|sea ice|global temperature)\b/.test(haystack) && /\b(at least|less than|more than|between|above|below|under|over|reach|reaches|hits|stays below)\b/.test(haystack)) {
-    score += 1.3;
+  if (measurableRule) {
+    score += 2;
     reasons.push('measurable weather rule');
+  }
+  if (schema.parseConfidence >= 0.8) {
+    score += 1.6;
+    reasons.push('high parse confidence');
+  } else if (schema.parseConfidence >= 0.6) {
+    score += 0.9;
+    reasons.push('usable parse confidence');
+  }
+  if (hasLocation) {
+    score += 0.6;
+    reasons.push('resolved location');
+  }
+  if (liquidityNumber(item.market) >= 2_500) {
+    score += 0.5;
+    reasons.push('meaningful liquidity');
+  }
+
+  if (schema.kind === 'unknown' && !measurableRule && !namedStormRule) {
+    ambiguityPenalty += 2.4;
+    reasons.push('unknown rule shape');
+  }
+  if (!hasLocation && schema.kind !== 'namedStorm' && !titleOnly.includes('global temperature') && !titleOnly.includes('sea ice')) {
+    ambiguityPenalty += 1.1;
+    reasons.push('missing location');
+  }
+  if (AMBIGUOUS_WEATHER_TOPIC_TERMS.some((keyword) => haystack.includes(normalizeText(keyword)))) {
+    ambiguityPenalty += 1.4;
+    reasons.push('topic-only weather wording');
+  }
+  if (WEATHER_DISCOVERY_KEYWORDS.some((keyword) => titleOnly.includes(normalizeText(keyword))) && !measurableRule && !namedStormRule && schema.parseConfidence < 0.58) {
+    ambiguityPenalty += 1.7;
+    reasons.push('weak weather linkage');
   }
 
   if (HARD_WEATHER_EXCLUSION_KEYWORDS.some((keyword) => haystack.includes(normalizeText(keyword)))) {
@@ -328,8 +385,17 @@ function assessWeatherDiscovery(item: FlattenedEventMarket): WeatherDiscoveryAss
     reasons.push('adjacent non-weather tag');
   }
 
-  const include = score >= 2.5 && !reasons.includes('hard exclusion keyword');
-  return { include, score, reasons };
+  const netScore = score - ambiguityPenalty;
+  const strong = netScore >= 5.2 && (measurableRule || namedStormRule || schema.parseConfidence >= 0.8);
+  const moderate = netScore >= 3.8 && schema.parseConfidence >= 0.58 && (measurableRule || namedStormRule || hasLocation);
+  const include = !reasons.includes('hard exclusion keyword') && (strong || moderate);
+  return {
+    include,
+    score: netScore,
+    reasons,
+    ambiguityPenalty,
+    matchStrength: strong ? 'strong' : moderate ? 'moderate' : 'weak',
+  };
 }
 
 function isWeatherLikeEvent(item: FlattenedEventMarket) {
@@ -574,9 +640,13 @@ function parseQualityBoost(schema: ResolutionSchema) {
   return schema.operator === 'between' ? 0.06 : 0;
 }
 
-function liveMatchConfidenceFrom(discovery: WeatherDiscoveryAssessment, schema: ResolutionSchema, canonicalLocation: string | null) {
+function liveMatchConfidenceFrom(discovery: WeatherDiscoveryAssessment, schema: ResolutionSchema, canonicalLocation: string | null, quote?: ClobQuote, market?: PolymarketMarket) {
   const locationBoost = canonicalLocation ? 0.08 : 0;
-  return clamp(0.22 + discovery.score / 8 + schema.parseConfidence * 0.45 + parseQualityBoost(schema) + locationBoost, 0.12, 0.99);
+  const matchStrengthBoost = discovery.matchStrength === 'strong' ? 0.08 : discovery.matchStrength === 'moderate' ? 0.03 : -0.08;
+  const ambiguityPenalty = clamp(discovery.ambiguityPenalty / 5, 0, 0.22);
+  const quoteBoost = quote && quoteStatusFrom(quote) !== 'empty' ? 0.04 : 0;
+  const liquidityBoost = market && liquidityNumber(market) >= 5_000 ? 0.03 : market && liquidityNumber(market) <= 250 ? -0.03 : 0;
+  return clamp(0.18 + discovery.score / 9 + schema.parseConfidence * 0.42 + parseQualityBoost(schema) + locationBoost + matchStrengthBoost + quoteBoost + liquidityBoost - ambiguityPenalty, 0.08, 0.995);
 }
 
 async function getPolymarketSnapshot(): Promise<{ items: FlattenedEventMarket[]; meta: Pick<MarketFeedMeta, 'livePolymarketWeatherCount' | 'totalPolymarketMarketsScanned' | 'livePolymarketParsedCount' | 'livePolymarketParsedTitles' | 'livePolymarketEventCount'> }> {
@@ -891,7 +961,7 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
   const freshnessMinutes = freshnessCandidates.length ? Math.min(...freshnessCandidates.map(minutesSince)) : 180;
   const disagreement = disagreementFrom([...built.sourceProbabilities, impliedProbability]);
   const clobQuote = clobQuoteFor(item.market);
-  const liveMatchConfidence = liveMatchConfidenceFrom(discoveryAssessment, schema, canonicalLocation);
+  const liveMatchConfidence = liveMatchConfidenceFrom(discoveryAssessment, schema, canonicalLocation, clobQuote, item.market);
   const confidence = confidenceFrom(edge, disagreement, freshnessMinutes, schema.parseConfidence, profile, clobQuote, liveMatchConfidence);
   const recencyScore = 1 - clamp(freshnessMinutes / 720);
   const sourceAgreement = 1 - clamp(disagreement / 0.4);
@@ -914,8 +984,7 @@ async function normalizeEventMarket(item: FlattenedEventMarket): Promise<Weather
     confidence,
     liquidity: fmtMoney(liquidityNumber(item.market)),
     volume24h: fmtMoney(volumeNumber(item.market)),
-    notes: `Discovered from Gamma event “${item.event.title}” with live weather-match confidence ${fmtPct(liveMatchConfidence)}. Canonical location resolved to ${canonicalLocation ?? 'no confident local point'}, then scored with ${profile.summary.toLowerCase()}`,
-    thesis: 'Event-first discovery from Gamma weather events, with canonicalized market-rule parsing before weather-model enrichment.',
+    notes: `Discovered from Gamma event “${item.event.title}” with ${discoveryAssessment.matchStrength} live weather-match confidence ${fmtPct(liveMatchConfidence)}. Canonical location resolved to ${canonicalLocation ?? 'no confident local point'}, then scored with ${profile.summary.toLowerCase()}. Discovery signals: ${discoveryAssessment.reasons.slice(0, 4).join(', ')}.`,    thesis: 'Event-first discovery from Gamma weather events, with canonicalized market-rule parsing before weather-model enrichment.',
     catalysts: ['Gamma weather event updates', 'CLOB price movement', 'Open-Meteo refresh', 'NWS hourly refresh'],
     risks: [
       canonicalLocation ? 'Canonical location is inferred from market language and may still miss sub-city observation sites.' : 'No reliable canonical location was found, so confidence is capped by parser quality and live-match certainty.',
