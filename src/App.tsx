@@ -34,6 +34,7 @@ import {
   type LedgerOwnerIdentity,
 } from './services/paperPersistence';
 import { createPaperBotLoopState, getPaperBotCadenceLabel, runPaperBotTick, type PaperBotLoopState } from './services/paperBotLoop';
+import { summarizePaperBotSupervision } from './services/paperBotSupervision';
 import {
   getFirebaseProjectId,
   onFirebaseAuthChanged,
@@ -571,6 +572,12 @@ function App() {
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
   const paperPerformance = useMemo(() => summarizePaperPerformance(paperBlotter), [paperBlotter]);
   const paperBotRuntime = useMemo(() => Object.values(paperBotState.marketRuntime), [paperBotState.marketRuntime]);
+  const paperBotSupervision = useMemo(() => summarizePaperBotSupervision({
+    botState: paperBotState,
+    markets: displayMarkets,
+    paperState,
+    paperOrders,
+  }), [displayMarkets, paperBotState, paperOrders, paperState]);
   const paperBotHotMarkets = useMemo(() => paperBotRuntime
     .filter((item) => item.state === 'queued' || item.state === 'active' || item.consecutiveWouldTradeTicks > 0)
     .sort((left, right) => right.consecutiveWouldTradeTicks - left.consecutiveWouldTradeTicks)
@@ -1049,7 +1056,7 @@ function App() {
             <div>
               <p className="eyebrow">Bot control</p>
               <h2>Persistent paper operator</h2>
-              <p className="subtle panel-intro">The paper bot is now wired into live app state, so queued and active decisions persist through refreshes and backend hydration.</p>
+              <p className="subtle panel-intro">The paper bot is now wired into live app state, so queued and active decisions persist through refreshes and backend hydration. This panel now also surfaces supervision checks so an always-on runner is easier to trust.</p>
             </div>
             <div className="table-actions">
               <button className={`command-button ${paperBotState.enabled ? 'active' : ''}`} onClick={togglePaperBotEnabled}>{paperBotState.enabled ? 'Pause bot' : 'Enable bot'}</button>
@@ -1073,9 +1080,40 @@ function App() {
             <div className="intel-card">
               <div className="source-title-row review-list-header">
                 <strong>Runtime watch</strong>
-                <span className="badge soft">{paperBotHotMarkets.length} active lanes</span>
+                <span className={`status-pill tone-${paperBotSupervision.healthTone}`}>{paperBotSupervision.healthLabel}</span>
               </div>
               <div className="stack-list compact-review-list">
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>{paperBotSupervision.headline}</strong>
+                      <span className="badge soft">{paperBotHotMarkets.length} hot lanes</span>
+                    </div>
+                    <p>{paperBotSupervision.detail}</p>
+                  </div>
+                </div>
+                {paperBotSupervision.checks.map((check) => (
+                  <div className="stack-row review-row" key={check.label}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{check.label}</strong>
+                        <span className={`status-pill tone-${check.tone}`}>{check.status}</span>
+                      </div>
+                      <p>{check.detail}</p>
+                    </div>
+                  </div>
+                ))}
+                {paperBotSupervision.alerts.map((alert) => (
+                  <div className="stack-row review-row" key={alert.title}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{alert.title}</strong>
+                        <span className={`status-pill tone-${alert.tone}`}>{alert.tone === 'bad' ? 'Intervene' : 'Watch'}</span>
+                      </div>
+                      <p>{alert.detail}</p>
+                    </div>
+                  </div>
+                ))}
                 {paperBotHotMarkets.length ? paperBotHotMarkets.map((runtime) => (
                   <div className="stack-row review-row" key={runtime.marketId}>
                     <div>

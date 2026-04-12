@@ -12,14 +12,16 @@ import {
 } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 
+const viteEnv = ((import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {});
+
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID,
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
+  apiKey: viteEnv.VITE_FIREBASE_API_KEY,
+  authDomain: viteEnv.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: viteEnv.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: viteEnv.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: viteEnv.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: viteEnv.VITE_FIREBASE_APP_ID,
+  measurementId: viteEnv.VITE_FIREBASE_MEASUREMENT_ID,
 };
 
 const requiredKeys = [
@@ -34,7 +36,7 @@ const requiredKeys = [
 let authPersistenceReady: Promise<void> | null = null;
 
 export function getFirebaseEnvStatus() {
-  const missing = requiredKeys.filter((key) => !import.meta.env[key]);
+  const missing = requiredKeys.filter((key) => !viteEnv[key]);
   return {
     ready: missing.length === 0,
     missing,

@@ -36,7 +36,8 @@ export const LOCAL_STORAGE_KEYS = {
 } as const;
 
 const COLLECTION_NAME = 'paperTradeLedgers';
-export const DEFAULT_PAPER_LEDGER_ID = (import.meta.env.VITE_PAPER_LEDGER_ID as string | undefined)?.trim() || 'default';
+const viteEnv = ((import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {});
+export const DEFAULT_PAPER_LEDGER_ID = viteEnv.VITE_PAPER_LEDGER_ID?.trim() || 'default';
 
 export type LedgerOwnerIdentity = {
   uid: string;

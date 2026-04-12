@@ -6,6 +6,7 @@ dist
 .vite
 .vercel
 .firebase
+firebase-debug.log
 vite.config.js
 vite.config.d.ts
 .env.local

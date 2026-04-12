@@ -50,6 +50,7 @@ This repo is now scaffolded for a standalone Firebase path on project `weather-m
 - `src/App.tsx` now offers Firebase Auth sign-in, hydrates only the signed-in owner's ledger from Firestore, and otherwise falls back cleanly to browser-local storage
 - `functions/src/index.ts` adds a backend-runner-ready scheduled paper bot tick path plus an HTTP trigger for manual runs
 - the UI shows whether paper persistence is running local-only or against Firestore
+- the operator panel now includes bot supervision checks for overdue ticks, stale inputs, queue buildup, and fill handoff gaps
 
 ### Local setup
 ```bash
