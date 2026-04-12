@@ -51,6 +51,7 @@ This repo is now scaffolded for a standalone Firebase path on project `weather-m
 - `functions/src/index.ts` adds a backend-runner-ready scheduled paper bot tick path plus an HTTP trigger for manual runs
 - the UI shows whether paper persistence is running local-only or against Firestore
 - the operator panel now includes bot supervision checks for overdue ticks, stale inputs, queue buildup, and fill handoff gaps
+- backend and manual bot ticks now append a durable run audit trail with action counts, stale-input counts, and queued versus active posture so production supervision can verify scheduler behavior without live trading
 
 ### Local setup
 ```bash
