@@ -142,6 +142,40 @@ h2 {
   margin-top: 14px;
 }
 
+.hero-explainer-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.hero-explainer-card,
+.empty-state-card {
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.hero-explainer-card strong,
+.empty-state-card strong {
+  display: block;
+  margin: 10px 0 8px;
+  font-size: 1rem;
+}
+
+.hero-explainer-card p,
+.empty-state-card p,
+.hero-status-copy,
+.panel-intro {
+  margin: 0;
+}
+
+.hero-status-copy {
+  margin-top: 14px;
+  max-width: 72ch;
+}
+
 .hero-metrics,
 .detail-metrics,
 .operator-grid,
@@ -360,6 +394,8 @@ h2 {
 .loading-panel,
 .error-panel {
   margin-top: 20px;
+  display: grid;
+  gap: 6px;
 }
 
 .error-panel {
@@ -413,6 +449,10 @@ h2 {
 
 .table-wrap {
   overflow-x: auto;
+}
+
+.empty-state-card {
+  margin-bottom: 18px;
 }
 
 table {
@@ -776,6 +816,7 @@ tbody tr:hover,
   }
 
   .hero-metrics,
+  .hero-explainer-grid,
   .detail-metrics,
   .score-grid,
   .trend-grid,

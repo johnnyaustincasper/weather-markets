@@ -35,6 +35,14 @@ const formatClock = (iso?: string) => {
   if (!iso) return '--';
   return new Date(iso).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 };
+const formatScanState = (meta: MarketFeedMeta | null, loading: boolean, refreshing: boolean, error: string) => {
+  if (error) return 'Scanner offline, showing no ranked opportunities until feeds recover.';
+  if (loading && !meta) return 'Connecting to Polymarket and live weather feeds to build the first ranked board.';
+  if (refreshing) return 'Refreshing market odds and model estimates now.';
+  if (meta?.usedCuratedFallback) return 'Live market discovery is unavailable, fallback watchlist mode is active.';
+  if (meta) return `Live scan online, comparing market prices against weather-model probabilities from ${meta.weatherSourceMix.join(', ')}.`;
+  return 'Waiting for the scanner to initialize.';
+};
 
 type MarketStatus = 'live' | 'watch' | 'stale' | 'cold';
 type AlertTone = 'good' | 'warn' | 'bad';
@@ -466,6 +474,8 @@ function App() {
   const actionCount = allAlerts.filter((alert) => alert.tone !== 'bad').length;
 
   const activeRegimePreset = useMemo(() => getActiveRegimePreset(regimeTuning), [regimeTuning]);
+  const scanState = useMemo(() => formatScanState(meta, loading, refreshing, error), [meta, loading, refreshing, error]);
+  const hasMarkets = markets.length > 0;
 
   const updateRegimeTuning = <K extends keyof WatcherRegimeTuning>(key: K, value: WatcherRegimeTuning[K]) => {
     setRegimeTuning((current) => ({ ...current, [key]: value }));
@@ -492,17 +502,31 @@ function App() {
       <main className="dashboard">
         <section className="hero panel">
           <div>
-            <p className="eyebrow">Weather Markets</p>
-            <h1>Discover live weather markets, then act on what actually changed.</h1>
+            <p className="eyebrow">Weather prediction market scanner</p>
+            <h1>Rank weather contracts by the gap between market odds and live forecast estimates.</h1>
             <p className="subtle hero-copy">
-              The scanner now diffs each refresh locally, flags edge and confidence moves, warns when disagreement or freshness worsens, and keeps a watch-focused queue for the desk.
+              This app scans live weather prediction markets, converts each contract into a weather thesis, compares market-implied odds against live weather-model probabilities, and ranks the biggest potential opportunities first.
             </p>
-            <div className="hero-status-row">
-              <span className="badge">{meta ? `${meta.livePolymarketEventCount} weather events discovered` : 'Loading feeds'}</span>
-              <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} event markets flattened` : 'Flattening events'}</span>
-              <span className="badge soft">{meta ? `${allAlerts.length} notable changes` : 'Scanning for changes'}</span>
-              {selectedMarket && <span className="badge soft">Status {marketDeltas[selectedMarket.id]?.statusTo.toUpperCase() ?? 'LIVE'}</span>}
+            <div className="hero-explainer-grid">
+              <div className="hero-explainer-card">
+                <span className="summary-label">How to read it</span>
+                <strong>Market price vs model price</strong>
+                <p className="subtle">Positive edge means the model is higher than the market. Negative edge means the market is already richer than the forecast stack.</p>
+              </div>
+              <div className="hero-explainer-card">
+                <span className="summary-label">What gets ranked up</span>
+                <strong>Edge, confidence, execution</strong>
+                <p className="subtle">The board lifts contracts where the implied odds, live weather inputs, freshness, and order-book quality line up cleanly.</p>
+              </div>
             </div>
+            <div className="hero-status-row">
+              <span className={`badge ${error ? 'tone-bad' : meta?.usedCuratedFallback ? 'tone-warn' : 'tone-good'}`}>{error ? 'Scanner offline' : meta?.usedCuratedFallback ? 'Fallback mode' : 'Live scanner online'}</span>
+              <span className="badge soft">{meta ? `${meta.livePolymarketEventCount} weather events discovered` : 'Loading event feed'}</span>
+              <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} contracts ranked` : 'Ranking contracts'}</span>
+              <span className="badge soft">{meta ? `${allAlerts.length} live changes flagged` : 'Scanning for changes'}</span>
+              {selectedMarket && <span className="badge soft">Selected {marketDeltas[selectedMarket.id]?.statusTo.toUpperCase() ?? 'LIVE'}</span>}
+            </div>
+            <p className="subtle hero-status-copy">{scanState}</p>
           </div>
           <div className="hero-metrics">
             <Metric label="Displayed candidates" value={String(markets.length).padStart(2, '0')} />
@@ -512,19 +536,19 @@ function App() {
           </div>
         </section>
 
-        {error && <section className="panel error-panel">{error}</section>}
-        {loading && <section className="panel loading-panel">Refreshing live market and weather feeds…</section>}
+        {error && <section className="panel error-panel"><strong>Unable to rank opportunities right now.</strong><span>{error}</span></section>}
+        {loading && <section className="panel loading-panel"><strong>Building the ranked opportunity board…</strong><span>Pulling Polymarket weather contracts, market quotes, and weather-model inputs.</span></section>}
 
         <section className="summary-grid summary-grid-wide">
           <div className="panel summary-card">
             <span className="summary-label">Action queue</span>
             <strong>{actionCount} reviewable alerts</strong>
-            <span className="subtle">{allAlerts[0]?.marketTitle ?? 'Waiting for the first delta snapshot.'}</span>
+            <span className="subtle">{allAlerts[0]?.marketTitle ?? 'Waiting for the second scan so the board can compare one refresh against the next.'}</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Feed posture</span>
             <strong>{deterioratingCount} markets losing freshness</strong>
-            <span className="subtle">Last local scan {formatClock(lastScanAt || meta?.refreshedAt)}</span>
+            <span className="subtle">Last ranked scan {formatClock(lastScanAt || meta?.refreshedAt)}</span>
           </div>
           <div className="panel summary-card">
             <span className="summary-label">Watcher memory</span>
@@ -610,6 +634,7 @@ function App() {
               <div>
                 <p className="eyebrow">Candidates</p>
                 <h2>Opportunity board</h2>
+                <p className="subtle panel-intro">Highest-ranked contracts are the ones with the strongest gap between market-implied odds and live weather-model estimates, adjusted for confidence and execution quality.</p>
               </div>
               <div className="table-actions">
                 <span className="badge">{meta?.weatherSourceMix.join(' · ') ?? 'Live feeds'}</span>
@@ -618,6 +643,14 @@ function App() {
                 </button>
               </div>
             </div>
+            {!hasMarkets && !loading ? (
+              <div className="empty-state-card">
+                <span className="summary-label">No ranked contracts yet</span>
+                <strong>{meta?.usedCuratedFallback ? 'Fallback watchlist is empty.' : 'The scanner did not find any weather contracts to rank on this pass.'}</strong>
+                <p className="subtle">When markets appear, this board will sort them by opportunity score, showing where live forecast probabilities diverge most from market pricing.</p>
+              </div>
+            ) : (
+              <>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -727,6 +760,8 @@ function App() {
                 );
               })}
             </div>
+              </>
+            )}
           </div>
 
           <div className="detail-stack">
@@ -774,11 +809,11 @@ function App() {
                   <div className="operator-grid">
                     <ActionCard
                       title="Primary move"
-                      body={marketDeltas[selectedMarket.id]?.alerts[0]?.detail ?? 'Initial local snapshot captured. Next refresh will surface change alerts.'}
+                      body={marketDeltas[selectedMarket.id]?.alerts[0]?.detail ?? 'This contract is ranked from the current gap between market odds and live weather-model probabilities. After the next scan, this panel will call out what changed.'}
                     />
                     <ActionCard
                       title="Desk action"
-                      body={marketDeltas[selectedMarket.id]?.alerts[0]?.action ?? 'Watch this market if the desk wants a standing alert on the next scan delta.'}
+                      body={marketDeltas[selectedMarket.id]?.alerts[0]?.action ?? 'Use watchlist mode for names you want to monitor, then revisit after the next live refresh for a ranked delta.'}
                       emphasis
                     />
                   </div>
@@ -884,7 +919,7 @@ function App() {
                   ))}
                 </div>
               ) : (
-                <p className="subtle">History appears once this market has been scanned locally and then revisited on a later refresh.</p>
+                <p className="subtle">History appears after this contract has at least two local scans, so the app can show how market odds and weather estimates changed over time.</p>
               )}
             </section>
 
@@ -917,11 +952,11 @@ function App() {
                 )) : (
                   <div className="source-row">
                     <div>
-                      <strong>Awaiting delta history</strong>
-                      <p>The first snapshot is loaded. Alerts will appear after the next refresh when the scanner has something to compare.</p>
+                      <strong>Awaiting comparison data</strong>
+                      <p>The first ranked snapshot is loaded. Alerts appear after the next refresh, once the scanner can compare market-implied odds and model estimates across scans.</p>
                     </div>
                     <div className="source-metrics">
-                      <span>Pin markets now so the desk is ready for the next change.</span>
+                      <span>Add contracts to the watchlist now so the desk is ready when a real pricing gap opens.</span>
                     </div>
                   </div>
                 )}
