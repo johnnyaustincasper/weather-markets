@@ -8,7 +8,6 @@ import { localMarketProvider } from '../../src/services/marketData.js';
 import { runPaperBotTick } from '../../src/services/paperBotLoop.js';
 import type { PaperBotRunAuditEntry, PersistentPaperState } from '../../src/services/paperPersistence.js';
 import { buildPaperLedgerDocumentId, DEFAULT_LEDGER_COLLECTION, sanitizePersistentPaperState } from './paperLedger.js';
-import { describeOwnerLedgerIdentity } from '../../src/services/paperPersistence.js';
 
 initializeApp();
 setGlobalOptions({ maxInstances: 1, region: 'us-central1' });
@@ -18,6 +17,7 @@ const DEFAULT_OWNER_ID = process.env.WEATHER_MARKETS_RUNNER_ID?.trim() || 'fireb
 const DEFAULT_LEDGER_ID = process.env.WEATHER_MARKETS_PAPER_LEDGER_ID?.trim() || 'default';
 const DEFAULT_SCHEDULE = process.env.WEATHER_MARKETS_CRON?.trim() || 'every 5 minutes';
 const MANUAL_TRIGGER_SECRET = process.env.WEATHER_MARKETS_TRIGGER_SECRET?.trim() || '';
+const MARKET_SCAN_TIMEOUT_MS = 25_000;
 
 export type PaperTickRunSummary = {
   ok: boolean;
@@ -51,6 +51,13 @@ type PaperTickRunOptions = {
   trigger?: PaperTickRunSummary['trigger'];
 };
 
+type BackendHealthSummary = {
+  status: 'fresh' | 'watch' | 'stale' | 'unknown';
+  observedLagMinutes: number | null;
+  expectedCadenceMinutes: number | null;
+  reason: string | null;
+};
+
 function isConfiguredOwnerId(ownerId: string) {
   return ownerId.trim().length > 0 && ownerId !== 'firebase-scheduler';
 }
@@ -61,19 +68,165 @@ function sanitizeRequestedValue(value: unknown) {
 
 function buildWarnings(ownerId: string, ledgerId: string) {
   const warnings: string[] = [];
-  const ownerScope = describeOwnerLedgerIdentity(ownerId, ledgerId);
+  const ownerScope = buildOwnerScope(ownerId, ledgerId);
   if (!isConfiguredOwnerId(ownerId)) {
     warnings.push(`Runner ownerId is still the default firebase-scheduler placeholder. Set WEATHER_MARKETS_RUNNER_ID to the Firebase Auth uid that owns the paper ledger for always-on automation. Expected ledger path: ${ownerScope.documentPath}`);
   }
   return warnings;
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s`)), timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
 function buildOwnerScope(ownerId: string, ledgerId: string): PaperTickRunSummary['ownerScope'] {
-  const ownerScope = describeOwnerLedgerIdentity(ownerId, ledgerId);
+  const normalizedOwnerId = ownerId.trim();
+  const normalizedLedgerId = ledgerId.trim() || DEFAULT_LEDGER_ID;
+  const documentId = buildPaperLedgerDocumentId(normalizedLedgerId, normalizedOwnerId);
   return {
-    ...ownerScope,
+    ownerUid: normalizedOwnerId,
+    ledgerId: normalizedLedgerId,
+    documentId,
+    collectionName: DEFAULT_LEDGER_COLLECTION,
+    documentPath: `${DEFAULT_LEDGER_COLLECTION}/${documentId}`,
     envVar: 'WEATHER_MARKETS_RUNNER_ID',
     note: 'Set WEATHER_MARKETS_RUNNER_ID to this ownerUid so the backend runner writes to the same owner-scoped ledger document as the signed-in app.',
+  };
+}
+
+function getExpectedCadenceMinutes() {
+  const match = DEFAULT_SCHEDULE.match(/every\s+(\d+)\s+minute/i);
+  return match ? Number(match[1]) : 5;
+}
+
+function summarizeBackendHealth(params: {
+  lastRunAt?: string | null;
+  lastAttemptedAt?: string | null;
+  lastRunOk?: boolean | null;
+  enabled?: boolean | null;
+  now?: string;
+}) : BackendHealthSummary {
+  const now = params.now ?? new Date().toISOString();
+  const anchor = params.lastRunAt ?? params.lastAttemptedAt ?? null;
+  const expectedCadenceMinutes = getExpectedCadenceMinutes();
+  if (!anchor) {
+    return {
+      status: 'unknown',
+      observedLagMinutes: null,
+      expectedCadenceMinutes,
+      reason: 'No backend tick has been recorded yet.',
+    };
+  }
+
+  const observedLagMinutes = Math.max(0, Math.round((new Date(now).getTime() - new Date(anchor).getTime()) / 60_000));
+  if (params.enabled === false) {
+    return {
+      status: 'watch',
+      observedLagMinutes,
+      expectedCadenceMinutes,
+      reason: 'Bot is disabled, so backend cadence is intentionally idle.',
+    };
+  }
+
+  if (params.lastRunOk === false) {
+    return {
+      status: 'stale',
+      observedLagMinutes,
+      expectedCadenceMinutes,
+      reason: 'Latest backend tick failed. Operator review is needed before trusting automation.',
+    };
+  }
+
+  if (observedLagMinutes >= expectedCadenceMinutes * 3) {
+    return {
+      status: 'stale',
+      observedLagMinutes,
+      expectedCadenceMinutes,
+      reason: `Latest backend heartbeat is ${observedLagMinutes}m old on an expected ${expectedCadenceMinutes}m cadence.`,
+    };
+  }
+
+  if (observedLagMinutes >= expectedCadenceMinutes * 2) {
+    return {
+      status: 'watch',
+      observedLagMinutes,
+      expectedCadenceMinutes,
+      reason: `Backend heartbeat is drifting, ${observedLagMinutes}m old on an expected ${expectedCadenceMinutes}m cadence.`,
+    };
+  }
+
+  return {
+    status: 'fresh',
+    observedLagMinutes,
+    expectedCadenceMinutes,
+    reason: 'Backend cadence looks recent enough for operator trust.',
+  };
+}
+
+function buildBackendStatus(params: {
+  runner: string;
+  trigger: PaperTickRunSummary['trigger'];
+  lastAttemptedAt: string;
+  lastRunAt: string;
+  lastRunOk: boolean;
+  lastRunSummary: string;
+  warnings: string[];
+  state?: PersistentPaperState;
+  marketRefreshAt?: string | null;
+  marketCount?: number;
+  actionCount?: number;
+  staleMarketCount?: number;
+  queuedCount?: number;
+  activeCount?: number;
+  lastError?: string | null;
+  lastFailureAt?: string | null;
+  consecutiveFailures?: number;
+}) {
+  const expectedCadenceMinutes = getExpectedCadenceMinutes();
+  const backendHealth = summarizeBackendHealth({
+    lastRunAt: params.lastRunAt,
+    lastAttemptedAt: params.lastAttemptedAt,
+    lastRunOk: params.lastRunOk,
+    enabled: params.state?.botState?.enabled,
+    now: params.lastRunAt,
+  });
+
+  return {
+    runner: params.runner,
+    trigger: params.trigger,
+    schedule: DEFAULT_SCHEDULE,
+    lastAttemptedAt: params.lastAttemptedAt,
+    lastRunAt: params.lastRunAt,
+    lastRunOk: params.lastRunOk,
+    lastRunSummary: params.lastRunSummary,
+    lastWarnings: params.warnings,
+    lastError: params.lastError ?? null,
+    lastFailureAt: params.lastFailureAt ?? null,
+    consecutiveFailures: params.consecutiveFailures ?? 0,
+    lastMarketRefreshAt: params.marketRefreshAt ?? null,
+    lastMarketCount: params.marketCount ?? 0,
+    lastActionCount: params.actionCount ?? 0,
+    lastStaleMarketCount: params.staleMarketCount ?? 0,
+    lastQueuedCount: params.queuedCount ?? 0,
+    lastActiveCount: params.activeCount ?? 0,
+    expectedCadenceMinutes,
+    observedLagMinutes: backendHealth.observedLagMinutes,
+    staleStatus: backendHealth.status,
+    staleReason: backendHealth.reason,
+    leaseOwnerId: params.state?.botState?.lease.ownerId ?? null,
+    leaseExpiresAt: params.state?.botState?.lease.expiresAt ?? null,
+    updatedAt: params.lastRunAt,
   };
 }
 
@@ -137,14 +290,18 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       source: 'firestore',
       ownerScope,
       backend: {
-        runner: ownerId,
-        trigger,
-        schedule: DEFAULT_SCHEDULE,
-        lastAttemptedAt: startedAt,
-        lastRunAt: finishedAt,
-        lastRunOk: false,
-        lastRunSummary: blockedSummary,
-        lastWarnings: warnings,
+        ...buildBackendStatus({
+          runner: ownerId,
+          trigger,
+          lastAttemptedAt: startedAt,
+          lastRunAt: finishedAt,
+          lastRunOk: false,
+          lastRunSummary: blockedSummary,
+          warnings,
+          lastError: blockedSummary,
+          lastFailureAt: finishedAt,
+          consecutiveFailures: 1,
+        }),
       },
       botRunHistory: [runAuditEntry],
       botState: {
@@ -183,7 +340,7 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
 
   try {
     const [marketsResponse, state] = await Promise.all([
-      localMarketProvider.getMarkets(),
+      withTimeout(localMarketProvider.getMarkets(), MARKET_SCAN_TIMEOUT_MS, 'Market scan'),
       loadLedgerState(documentId),
     ]);
 
@@ -219,20 +376,23 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       source: 'firestore',
       ownerScope,
       backend: {
-        runner: ownerId,
-        trigger,
-        lastAttemptedAt: startedAt,
-        lastMarketRefreshAt: marketsResponse.meta.refreshedAt,
-        lastMarketCount: marketsResponse.markets.length,
-        lastActionCount: result.actions.length,
-        lastRunSummary: result.summary,
-        lastRunAt: finishedAt,
-        lastRunOk: true,
-        lastWarnings: warnings,
-        lastStaleMarketCount: staleMarketCount,
-        lastQueuedCount: queuedCount,
-        lastActiveCount: activeCount,
-        schedule: DEFAULT_SCHEDULE,
+        ...buildBackendStatus({
+          runner: ownerId,
+          trigger,
+          lastAttemptedAt: startedAt,
+          lastRunAt: finishedAt,
+          lastRunOk: true,
+          lastRunSummary: result.summary,
+          warnings,
+          state: result.state,
+          marketRefreshAt: marketsResponse.meta.refreshedAt,
+          marketCount: marketsResponse.markets.length,
+          actionCount: result.actions.length,
+          staleMarketCount,
+          queuedCount,
+          activeCount,
+          consecutiveFailures: 0,
+        }),
       },
       botRunHistory: [runAuditEntry, ...(result.state.botRunHistory ?? [])].slice(0, 12),
       botState: {
@@ -297,14 +457,21 @@ export async function runPaperBotTickOnce(options?: PaperTickRunOptions): Promis
       source: 'firestore',
       ownerScope,
       backend: {
-        runner: ownerId,
-        trigger,
-        lastAttemptedAt: startedAt,
-        lastRunAt: finishedAt,
-        lastRunOk: false,
-        lastRunSummary: message,
-        lastWarnings: warnings,
-        schedule: DEFAULT_SCHEDULE,
+        ...buildBackendStatus({
+          runner: ownerId,
+          trigger,
+          lastAttemptedAt: startedAt,
+          lastRunAt: finishedAt,
+          lastRunOk: false,
+          lastRunSummary: message,
+          warnings,
+          state: previousState,
+          queuedCount,
+          activeCount,
+          lastError: message,
+          lastFailureAt: finishedAt,
+          consecutiveFailures: failureCount,
+        }),
       },
       botRunHistory: [runAuditEntry, ...(previousState.botRunHistory ?? [])].slice(0, 12),
       botState: {
@@ -358,5 +525,71 @@ export const triggerPaperBotNow = onRequest({ cors: true, timeoutSeconds: 180, m
       ok: false,
       error: error instanceof Error ? error.message : 'Unknown error',
     });
+  }
+});
+
+export const getPaperBotStatus = onRequest({ cors: true, timeoutSeconds: 60, memory: '256MiB' }, async (request, response) => {
+  try {
+    const secret = sanitizeRequestedValue(request.get('x-weather-markets-trigger-secret'))
+      ?? sanitizeRequestedValue(request.query.secret)
+      ?? sanitizeRequestedValue(request.body?.secret);
+
+    if (MANUAL_TRIGGER_SECRET && secret !== MANUAL_TRIGGER_SECRET) {
+      response.status(401).json({ ok: false, error: 'Invalid trigger secret.' });
+      return;
+    }
+
+    const ledgerId = sanitizeRequestedValue(request.query.ledgerId) ?? sanitizeRequestedValue(request.body?.ledgerId) ?? DEFAULT_LEDGER_ID;
+    const ownerId = sanitizeRequestedValue(request.query.ownerId) ?? sanitizeRequestedValue(request.body?.ownerId) ?? DEFAULT_OWNER_ID;
+    const documentId = buildPaperLedgerDocumentId(ledgerId, ownerId);
+    const state = await loadLedgerState(documentId);
+    const ownerScope = buildOwnerScope(ownerId, ledgerId);
+    const backend = state.backend ?? buildBackendStatus({
+      runner: ownerId,
+      trigger: 'http',
+      lastAttemptedAt: state.botState.lastTickStartedAt ?? state.syncedAt,
+      lastRunAt: state.botState.lastTickCompletedAt ?? state.syncedAt,
+      lastRunOk: state.botState.status !== 'error' && state.botState.status !== 'blocked',
+      lastRunSummary: state.botState.lastSummary ?? 'No backend summary saved yet.',
+      warnings: buildWarnings(ownerId, ledgerId),
+      state,
+      queuedCount: Object.values(state.paperState).filter((item) => item.state === 'queued').length,
+      activeCount: Object.values(state.paperState).filter((item) => item.state === 'active').length,
+      lastError: state.botState.lastError,
+      consecutiveFailures: state.botState.failureCount ?? 0,
+    });
+    const health = summarizeBackendHealth({
+      lastRunAt: backend.lastRunAt,
+      lastAttemptedAt: backend.lastAttemptedAt,
+      lastRunOk: backend.lastRunOk,
+      enabled: state.botState.enabled,
+    });
+
+    response.status(200).json({
+      ok: true,
+      ledgerId,
+      ownerId,
+      ownerScope,
+      persistencePath: `${DEFAULT_LEDGER_COLLECTION}/${documentId}`,
+      botState: {
+        enabled: state.botState.enabled,
+        status: state.botState.status,
+        tickCount: state.botState.tickCount,
+        failureCount: state.botState.failureCount,
+        nextDueAt: state.botState.nextDueAt,
+        lastTickStartedAt: state.botState.lastTickStartedAt,
+        lastTickCompletedAt: state.botState.lastTickCompletedAt,
+        lastSummary: state.botState.lastSummary,
+        lastError: state.botState.lastError,
+        haltReason: state.botState.haltReason,
+      },
+      backend,
+      health,
+      latestRun: state.botRunHistory?.[0] ?? null,
+      recentRuns: (state.botRunHistory ?? []).slice(0, 5),
+    });
+  } catch (error) {
+    logger.error('Paper bot status lookup failed', error);
+    response.status(500).json({ ok: false, error: error instanceof Error ? error.message : 'Unknown error' });
   }
 });
