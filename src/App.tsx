@@ -18,6 +18,7 @@ import { cancelPaperOrder, getPaperOrders, placePaperOrder, syncPaperOrders, typ
 import {
   summarizePaperRiskGovernor,
 } from './services/paperRiskGovernor';
+import { summarizePaperValidationGate } from './services/paperValidationGate';
 import {
   DEFAULT_PAPER_EXECUTION_SETTINGS,
   mergePaperExecutionSettings,
@@ -33,6 +34,7 @@ import {
 } from './services/marketHistory';
 import {
   DEFAULT_PAPER_LEDGER_ID,
+  describeOwnerLedgerIdentity,
   isFirestorePersistenceEnabled,
   loadPersistentPaperState,
   persistPaperState,
@@ -42,7 +44,10 @@ import {
 } from './services/paperPersistence';
 import { createPaperBotLoopState, getPaperBotCadenceLabel, runPaperBotTick, type PaperBotLoopState } from './services/paperBotLoop';
 import { summarizePaperBotSupervision } from './services/paperBotSupervision';
+import { getTradingRuntimeLabel, TRADING_RUNTIME } from './services/tradingRuntime';
 import {
+  finalizeFirebaseRedirectSignIn,
+  getFirebaseEnvStatus,
   getFirebaseProjectId,
   onFirebaseAuthChanged,
   signInToFirebase,
@@ -74,6 +79,25 @@ const formatDateTime = (iso?: string) => {
 };
 const clampOrderPrice = (value: number) => Math.min(0.99, Math.max(0.01, value));
 const formatUsd = (value: number) => value.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+const clampPctInput = (value: number, minPct: number, maxPct: number) => Math.min(maxPct, Math.max(minPct, value));
+const milestoneLabel = (current: number, target: number) => `${Math.min(current, target)}/${target}`;
+const automationGateTone = (allowed: boolean, status: 'trusted' | 'cautious' | 'restricted' | 'promoted' | 'unproven' | 'demoted' | 'disabled') => (
+  allowed ? 'tone-good' : status === 'cautious' || status === 'promoted' || status === 'unproven' ? 'tone-warn' : 'tone-bad'
+);
+const riskRailStatusLabel = (safePct: number, hardPct: number) => `Safe at ${pct(safePct)}, auto-stop at ${pct(hardPct)}`;
+const compactUid = (value?: string | null) => {
+  if (!value) return '--';
+  return value.length <= 16 ? value : `${value.slice(0, 8)}…${value.slice(-6)}`;
+};
+const copyToClipboard = async (value: string) => {
+  if (typeof navigator === 'undefined' || !navigator.clipboard) return false;
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 type MarketStatus = 'best' | 'watch' | 'candidate' | 'stale' | 'skip';
 type AlertTone = 'good' | 'warn' | 'bad';
@@ -280,6 +304,7 @@ function App() {
   const [paperOrderDrafts, setPaperOrderDrafts] = useState<Record<string, { quantity: number; limitPrice: number; note: string }>>({});
   const [paperRepriceMeta, setPaperRepriceMeta] = useState<{ at: string; changedCount: number } | null>(null);
   const [selectedReviewMarketId, setSelectedReviewMarketId] = useState('');
+  const firebaseEnvStatus = useMemo(() => getFirebaseEnvStatus(), []);
   const [persistenceStatus, setPersistenceStatus] = useState<{ mode: 'local' | 'firestore'; detail: string }>({
     mode: isFirestorePersistenceEnabled() ? 'firestore' : 'local',
     detail: isFirestorePersistenceEnabled()
@@ -292,16 +317,40 @@ function App() {
     email: authUser.email,
     displayName: authUser.displayName,
   }) : null, [authUser]);
+  const appLedgerScope = useMemo(() => ledgerOwner ? describeOwnerLedgerIdentity(ledgerOwner.uid, DEFAULT_PAPER_LEDGER_ID) : null, [ledgerOwner]);
+  const authModeLabel = ledgerOwner ? 'Signed in with Google' : persistenceStatus.mode === 'firestore' ? 'Firestore ready, waiting on owner auth' : 'Local-only mode';
+  const authModeDetail = !firebaseEnvStatus.ready
+    ? `Firebase env missing: ${firebaseEnvStatus.missing.join(', ')}`
+    : ledgerOwner
+      ? `Owner-scoped sync is live in project ${getFirebaseProjectId() ?? '--'}.`
+      : authReady
+        ? 'Sign in with Google to move this ledger out of browser-local mode and into your owner-scoped Firestore path.'
+        : 'Checking Firebase Auth session...';
 
-  useEffect(() => onFirebaseAuthChanged((user) => {
-    setAuthUser(user);
-    setAuthReady(true);
-  }), []);
+  useEffect(() => {
+    void finalizeFirebaseRedirectSignIn().catch(() => {
+      // best effort, auth listener below remains source of truth
+    });
+
+    return onFirebaseAuthChanged((user) => {
+      setAuthUser(user);
+      setAuthReady(true);
+    });
+  }, []);
 
   const handleSignIn = useCallback(async () => {
     try {
       setAuthBusy(true);
-      await signInToFirebase();
+      setPersistenceStatus({
+        mode: isFirestorePersistenceEnabled() ? 'firestore' : 'local',
+        detail: 'Starting Google sign-in. If your browser blocks popups or you are on mobile, the app will continue with a full-page Google redirect.',
+      });
+      const result = await signInToFirebase();
+      if (!result) return;
+      setPersistenceStatus({
+        mode: 'firestore',
+        detail: `Signed in as ${result.user.email ?? result.user.uid}. Firestore sync is ready for ledger ${DEFAULT_PAPER_LEDGER_ID}.`,
+      });
     } catch (error) {
       setPersistenceStatus({
         mode: 'local',
@@ -499,6 +548,7 @@ function App() {
               lastPersistedAt: null,
             }),
             botRunHistory: paperBotRunHistory,
+            runtime: TRADING_RUNTIME,
             syncedAt: new Date().toISOString(),
             source: 'local',
           }, ledgerOwner, DEFAULT_PAPER_LEDGER_ID);
@@ -546,6 +596,7 @@ function App() {
         paperOrders,
         botState: paperBotState,
         botRunHistory: paperBotRunHistory,
+        runtime: TRADING_RUNTIME,
         syncedAt: now,
         source: persistenceStatus.mode,
       },
@@ -637,6 +688,7 @@ function App() {
   const selectedHistory = useMemo(() => selectedMarket && selectedMarket.dataOrigin !== 'curated-watchlist' ? getMarketHistory(selectedMarket.id)?.snapshots ?? [] : [], [selectedMarket, historyTick]);
   const historyPreview = useMemo(() => selectedHistory.slice().reverse().slice(0, 5), [selectedHistory]);
   const paperPerformance = useMemo(() => summarizePaperPerformance(paperBlotter), [paperBlotter]);
+  const paperValidationGate = useMemo(() => summarizePaperValidationGate(paperBlotter), [paperBlotter]);
   const paperAccount = useMemo(() => summarizePaperAccount({ blotter: paperBlotter, orders: paperOrders, botState: paperBotState }), [paperBlotter, paperBotState, paperOrders]);
   const paperRiskGovernor = useMemo(() => summarizePaperRiskGovernor({
     settings: paperBotState.riskGovernor,
@@ -670,6 +722,11 @@ function App() {
     ? '--'
     : `${paperBotBackend.observedLagMinutes}m`;
   const backendFailureLabel = paperBotBackend?.consecutiveFailures ? String(paperBotBackend.consecutiveFailures) : '0';
+  const backendLedgerScope = useMemo(() => {
+    const runnerId = paperBotBackend?.runner?.trim();
+    return runnerId ? describeOwnerLedgerIdentity(runnerId, DEFAULT_PAPER_LEDGER_ID) : null;
+  }, [paperBotBackend?.runner]);
+  const ownerScopeAligned = Boolean(appLedgerScope && backendLedgerScope && appLedgerScope.documentPath === backendLedgerScope.documentPath);
   const allPaperOrders = useMemo(() => Object.values(paperOrders).flat(), [paperOrders]);
   const allFilledOrders = useMemo(() => allPaperOrders.filter((order) => order.filledQuantity > 0), [allPaperOrders]);
   const openBlotterEntries = useMemo(() => Object.values(paperBlotter)
@@ -926,9 +983,69 @@ function App() {
     setPaperBotState((current) => createPaperBotLoopState({
       ...current,
       enabled: !current.enabled,
+      autoStopped: false,
       status: !current.enabled ? 'idle' : 'blocked',
       nextDueAt: !current.enabled ? new Date(Date.now() + current.cadenceMs).toISOString() : null,
-      lastSummary: !current.enabled ? 'Paper bot enabled from the operator console.' : 'Paper bot paused from the operator console.',
+      haltReason: null,
+      safeModeReason: null,
+      autoStoppedAt: null,
+      safeModeSince: null,
+      lastSummary: !current.enabled ? 'Paper bot resumed from the operator console.' : 'Paper bot paused from the operator console.',
+    }));
+  };
+
+
+  const togglePaperBotSafeMode = () => {
+    setPaperBotState((current) => createPaperBotLoopState({
+      ...current,
+      operatorSafeMode: !current.operatorSafeMode,
+      haltReason: !current.operatorSafeMode ? 'operator-safe-mode' : current.haltReason === 'operator-safe-mode' ? null : current.haltReason,
+      safeModeReason: !current.operatorSafeMode ? 'Operator safe mode is active from the command center.' : null,
+      safeModeSince: !current.operatorSafeMode ? new Date().toISOString() : null,
+      lastSummary: !current.operatorSafeMode
+        ? 'Operator safe mode enabled. Fresh paper risk is paused.'
+        : 'Operator safe mode cleared. Fresh paper risk can resume when other gates allow.',
+    }));
+  };
+
+  const toggleSkipLowConfidence = () => {
+    setPaperBotState((current) => createPaperBotLoopState({
+      ...current,
+      skipLowConfidence: !current.skipLowConfidence,
+      lastSummary: !current.skipLowConfidence
+        ? `Low-confidence setups will now be skipped below ${pct(current.minimumConfidence)} confidence.`
+        : 'Low-confidence skip filter disabled. The bot will rely on the remaining guardrails.',
+    }));
+  };
+
+  const cycleConfidenceFloor = () => {
+    setPaperBotState((current) => {
+      const options = [0.58, 0.62, 0.66, 0.7];
+      const currentIndex = options.findIndex((value) => Math.abs(value - current.minimumConfidence) < 0.001);
+      const minimumConfidence = options[(currentIndex + 1) % options.length] ?? options[0];
+
+      return createPaperBotLoopState({
+        ...current,
+        minimumConfidence,
+        skipLowConfidence: true,
+        lastSummary: `Confidence floor set to ${pct(minimumConfidence)} for fresh paper setups.`,
+      });
+    });
+  };
+
+  const updateRiskGovernorSetting = <K extends keyof PaperBotLoopState['riskGovernor']>(key: K, value: PaperBotLoopState['riskGovernor'][K]) => {
+    setPaperBotState((current) => createPaperBotLoopState({
+      ...current,
+      riskGovernor: {
+        ...current.riskGovernor,
+        [key]: value,
+      },
+      autoStopped: false,
+      haltReason: null,
+      safeModeReason: null,
+      autoStoppedAt: null,
+      safeModeSince: null,
+      lastSummary: 'Risk governor thresholds updated from the operator console.',
     }));
   };
 
@@ -1243,6 +1360,7 @@ function App() {
               <span className="badge soft">scan@{formatClock(lastScanAt || meta?.refreshedAt)}</span>
               <span className="badge soft">{meta ? `${meta.livePolymarketWeatherCount} live contracts on scope` : 'Building scope'}</span>
               <span className="badge soft">feeds {meta?.weatherSourceMix.join(' · ') ?? 'Live feeds'}</span>
+              <span className="badge soft">{getTradingRuntimeLabel(TRADING_RUNTIME)} · live locked</span>
             </div>
             <p className="hero-status subtle">{scanState}</p>
           </div>
@@ -1255,6 +1373,55 @@ function App() {
         </section>
 
         {error && <section className="panel system-banner tone-bad" data-panel="sys.alert"><strong>System advisory</strong><span>{error}</span></section>}
+
+        <section className={`panel auth-command-strip ${ledgerOwner ? 'auth-live' : persistenceStatus.mode === 'local' ? 'auth-local' : 'auth-pending'}`} data-panel="auth.command">
+          <div className="panel-header auth-command-header">
+            <div>
+              <p className="eyebrow">Auth command</p>
+              <h2>{ledgerOwner ? 'Google owner attached to command' : 'Sign in with Google to attach this desk'}</h2>
+              <p className="subtle panel-intro">{authModeDetail}</p>
+            </div>
+            <div className="table-actions auth-command-actions">
+              <span className={`status-pill ${ledgerOwner ? 'tone-good' : 'tone-warn'}`}>{authModeLabel}</span>
+              <span className={`badge soft ${firebaseEnvStatus.ready ? '' : 'tone-bad'}`}>{firebaseEnvStatus.ready ? `Firebase ${getFirebaseProjectId() ?? '--'}` : 'Firebase env incomplete'}</span>
+              {ledgerOwner ? (
+                <button className="command-button" onClick={() => void handleSignOut()} disabled={authBusy}>
+                  {authBusy ? 'Working…' : 'Sign out'}
+                </button>
+              ) : (
+                <button className="command-button auth-primary-button auth-command-primary" onClick={() => void handleSignIn()} disabled={authBusy || !authReady || !firebaseEnvStatus.ready}>
+                  {authBusy ? 'Connecting…' : 'Sign in with Google'}
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="auth-command-grid">
+            <div className="auth-command-card auth-command-primary-card">
+              <span className="detail-label">Mode</span>
+              <strong>{ledgerOwner ? 'SIGNED-IN OWNER MODE' : 'LOCAL-ONLY BROWSER MODE'}</strong>
+              <p>{ledgerOwner
+                ? `This browser is writing to ${appLedgerScope?.documentPath ?? `${ledgerOwner.uid}__${DEFAULT_PAPER_LEDGER_ID}`}.`
+                : 'Nothing is tied to a Google owner yet. Until you sign in, this device keeps the paper ledger locally in this browser only.'}</p>
+            </div>
+            <div className="auth-command-card">
+              <span className="detail-label">Owner</span>
+              <strong>{ledgerOwner?.displayName ?? ledgerOwner?.email ?? 'Not signed in'}</strong>
+              <p>{ledgerOwner?.email ?? (firebaseEnvStatus.ready ? 'Use the big Google button to attach an owner account.' : 'Add VITE_FIREBASE_* env first, then sign in with Google.')}</p>
+            </div>
+            <div className="auth-command-card auth-uid-card">
+              <span className="detail-label">Owner UID</span>
+              <strong>{ledgerOwner?.uid ?? 'Awaiting Google sign-in'}</strong>
+              <p>{ledgerOwner ? `Ledger document ${appLedgerScope?.documentId ?? '--'}` : 'UID shows here immediately after sign-in so the owner path is explicit.'}</p>
+              {ledgerOwner && (
+                <div className="table-actions">
+                  <button className="command-button" onClick={() => void copyToClipboard(ledgerOwner.uid)}>
+                    Copy UID
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </section>
 
         <section className="panel account-command-panel" data-panel="acct.summary">
           <div className="panel-header">
@@ -1347,27 +1514,79 @@ function App() {
         </section>
 
         <section className={`panel system-banner ${persistenceStatus.mode === 'firestore' ? 'tone-good' : 'tone-warn'}`}>
-          <strong>{persistenceStatus.mode === 'firestore' ? 'Backend persistence online' : 'Local-only persistence'}</strong>
+          <strong>{persistenceStatus.mode === 'firestore' ? 'Firestore attached' : 'Local-only mode'}</strong>
           <span>{persistenceStatus.detail}</span>
+          <div className="identity-status-grid">
+            <div className="identity-status-card">
+              <span className="detail-label">Storage mode</span>
+              <strong>{persistenceStatus.mode === 'firestore' ? 'Firestore sync on' : 'Browser only'}</strong>
+              <p>{persistenceStatus.mode === 'firestore' ? `Project ${getFirebaseProjectId() ?? '--'} · ledger ${DEFAULT_PAPER_LEDGER_ID}` : 'This browser is the source of truth until Google sign-in finishes.'}</p>
+            </div>
+            <div className="identity-status-card">
+              <span className="detail-label">Owner</span>
+              <strong>{ledgerOwner?.displayName ?? ledgerOwner?.email ?? 'Not signed in'}</strong>
+              <p>{ledgerOwner ? `UID ${ledgerOwner.uid}` : authReady ? 'Use the Google button below to bind this ledger to your owner account.' : 'Checking Firebase Auth session...'}</p>
+            </div>
+          </div>
         </section>
         {isFirestorePersistenceEnabled() && (
+          <section className={`panel system-banner ${appLedgerScope && backendLedgerScope ? (ownerScopeAligned ? 'tone-good' : 'tone-warn') : 'tone-muted'}`}>
+            <strong>{appLedgerScope && backendLedgerScope ? (ownerScopeAligned ? 'Ledger target aligned' : 'Ledger target mismatch') : 'Ledger target visibility'}</strong>
+            <span>
+              App path {appLedgerScope?.documentPath ?? 'sign in to resolve owner-scoped app path'}.
+              {backendLedgerScope
+                ? ` Backend runner path ${backendLedgerScope.documentPath}.`
+                : ' Backend runner has not reported a target path yet.'}
+            </span>
+            {appLedgerScope ? (
+              <div className="stack-list compact-review-list">
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Backend env to set</strong>
+                      <span className={`status-pill ${ownerScopeAligned ? 'tone-good' : 'tone-warn'}`}>WEATHER_MARKETS_RUNNER_ID</span>
+                    </div>
+                    <p><code>WEATHER_MARKETS_RUNNER_ID={appLedgerScope.ownerUid}</code></p>
+                  </div>
+                  <div className="source-metrics">
+                    <small>{appLedgerScope.documentId}</small>
+                    <small>functions/.env.example</small>
+                  </div>
+                </div>
+              </div>
+            ) : null}
+          </section>
+        )}
+        {isFirestorePersistenceEnabled() && (
           <section className={`panel system-banner ${ledgerOwner ? 'tone-good' : 'tone-warn'}`}>
-            <strong>{ledgerOwner ? 'Trusted identity connected' : 'Sign in to unlock Firestore persistence'}</strong>
+            <strong>{ledgerOwner ? 'Google owner connected' : 'One-click Google sign-in'}</strong>
             <span>
               {ledgerOwner
-                ? `Signed in as ${ledgerOwner.displayName ?? ledgerOwner.email ?? ledgerOwner.uid}. Ledger writes are owner-scoped.`
+                ? `Signed in as ${ledgerOwner.displayName ?? ledgerOwner.email ?? ledgerOwner.uid}. This device is writing the owner-scoped ledger at ${appLedgerScope?.documentPath ?? `${ledgerOwner.uid}__${DEFAULT_PAPER_LEDGER_ID}`}.`
                 : authReady
-                  ? 'Use Firebase Auth before syncing paper state to Firestore. Local browser persistence still works without sign-in.'
+                  ? 'Tap once to attach this app to Firestore. Popup blocked or on mobile, it will automatically fall back to a full-page Google redirect.'
                   : 'Checking Firebase Auth session...'}
             </span>
+            <div className="identity-status-grid">
+              <div className="identity-status-card">
+                <span className="detail-label">Email</span>
+                <strong>{ledgerOwner?.email ?? 'Awaiting sign-in'}</strong>
+                <p>{ledgerOwner?.displayName ?? 'Google account owner label will appear here after auth completes.'}</p>
+              </div>
+              <div className="identity-status-card">
+                <span className="detail-label">UID</span>
+                <strong>{compactUid(ledgerOwner?.uid)}</strong>
+                <p>{ledgerOwner ? ledgerOwner.uid : 'UID appears here so the Firestore owner identity is unambiguous.'}</p>
+              </div>
+            </div>
             <div className="table-actions">
               {ledgerOwner ? (
                 <button className="command-button" onClick={() => void handleSignOut()} disabled={authBusy}>
                   {authBusy ? 'Working…' : 'Sign out'}
                 </button>
               ) : (
-                <button className="command-button" onClick={() => void handleSignIn()} disabled={authBusy || !authReady}>
-                  {authBusy ? 'Connecting…' : 'Sign in with Google'}
+                <button className="command-button auth-primary-button" onClick={() => void handleSignIn()} disabled={authBusy || !authReady}>
+                  {authBusy ? 'Connecting…' : 'Continue with Google'}
                 </button>
               )}
             </div>
@@ -1452,18 +1671,77 @@ function App() {
               <p className="subtle panel-intro">The paper bot is now wired into live app state, so queued and active decisions persist through refreshes and backend hydration. This panel now also surfaces supervision checks so an always-on runner is easier to trust.</p>
             </div>
             <div className="table-actions">
-              <button className={`command-button ${paperBotState.enabled ? 'active' : ''}`} onClick={togglePaperBotEnabled}>{paperBotState.enabled ? 'Pause bot' : 'Enable bot'}</button>
+              <button className={`command-button ${paperBotState.enabled ? 'active' : ''}`} onClick={togglePaperBotEnabled}>{paperBotState.enabled ? 'Pause bot' : 'Resume bot'}</button>
               <button className="command-button" onClick={cyclePaperBotCadence}>Cadence {getPaperBotCadenceLabel(paperBotState.cadenceMs)}</button>
-              <button className="command-button" onClick={runPaperBotNow} disabled={!markets.length}>Run now</button>
+              <button className="command-button" onClick={runPaperBotNow} disabled={!markets.length}>Force tick</button>
             </div>
           </div>
           <div className="execution-summary-grid review-metrics">
-            <ExecutionSummaryCard label="Status" value={paperBotState.status.toUpperCase()} detail={paperBotState.lastSummary ?? 'No bot tick yet.'} toneClass={paperBotState.enabled ? 'positive' : undefined} />
+            <ExecutionSummaryCard label="Status" value={paperBotState.autoStopped ? 'AUTO-STOPPED' : paperBotState.status.toUpperCase()} detail={paperBotState.lastSummary ?? 'No bot tick yet.'} toneClass={paperBotState.autoStopped ? 'negative' : paperBotState.enabled ? 'positive' : undefined} />
             <ExecutionSummaryCard label="Ticks" value={String(paperBotState.tickCount)} detail={`Cadence ${getPaperBotCadenceLabel(paperBotState.cadenceMs)}`} />
             <ExecutionSummaryCard label="Next due" value={paperBotState.nextDueAt ? formatClock(paperBotState.nextDueAt) : '--'} detail={paperBotState.nextDueAt ? formatDateTime(paperBotState.nextDueAt) : 'Bot is paused.'} />
+            <ExecutionSummaryCard label="Risk posture" value={paperRiskGovernor.halted ? 'HALTED' : paperRiskGovernor.safeMode ? 'SAFE MODE' : 'OPEN'} detail={paperBotState.autoStoppedAt ? `Auto-stopped ${formatDateTime(paperBotState.autoStoppedAt)}` : paperBotState.safeModeSince ? `Safe mode since ${formatDateTime(paperBotState.safeModeSince)}` : paperRiskGovernor.detail} toneClass={paperRiskGovernor.halted ? 'negative' : paperRiskGovernor.safeMode ? undefined : 'positive'} />
             <ExecutionSummaryCard label="Latest audit" value={latestBotAudit ? formatClock(latestBotAudit.runAt) : '--'} detail={latestBotAudit ? `${latestBotAudit.actionCount} actions, ${latestBotAudit.staleMarketCount} stale inputs` : 'No durable run record yet.'} toneClass={latestBotAudit ? 'positive' : undefined} />
             <ExecutionSummaryCard label="Backend heartbeat" value={backendHeartbeatLabel} detail={paperBotBackend?.staleReason ?? 'No backend heartbeat recorded yet.'} toneClass={backendHealthTone} />
             <ExecutionSummaryCard label="Backend failures" value={backendFailureLabel} detail={paperBotBackend?.lastError ?? paperBotBackend?.lastRunSummary ?? 'No backend failure recorded.'} toneClass={paperBotBackend?.consecutiveFailures ? 'negative' : undefined} />
+            <ExecutionSummaryCard label="Bot trust" value={paperValidationGate.botTrust.status.toUpperCase()} detail={paperValidationGate.botTrust.note} toneClass={paperValidationGate.botTrust.status === 'trusted' ? 'positive' : paperValidationGate.botTrust.status === 'restricted' ? 'negative' : undefined} />
+            <ExecutionSummaryCard label="Automation gate" value={paperValidationGate.botTrust.automationAllowed ? 'OPEN' : 'BLOCKED'} detail={paperValidationGate.botTrust.automationAllowed ? 'Fresh queueing and activation are allowed.' : paperValidationGate.botTrust.blockers[0] ?? 'Fresh queueing and activation stay blocked.'} toneClass={paperValidationGate.botTrust.automationAllowed ? 'positive' : 'negative'} />
+          </div>
+          <div className="review-diagnostics-grid operator-intervention-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Explicit operator controls</span>
+                  <p className="subtle">Command-center overrides for pause, safe mode, manual ticks, and low-confidence filtering.</p>
+                </div>
+                <span className="badge soft">Paper ops</span>
+              </div>
+              <div className="stack-list compact-review-list">
+                <div className="stack-row review-row intervention-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Pause / resume automation</strong>
+                      <span className={`status-pill ${paperBotState.enabled ? 'tone-good' : 'tone-warn'}`}>{paperBotState.enabled ? 'RUNNING' : 'PAUSED'}</span>
+                    </div>
+                    <p>Stops or resumes the paper bot without clearing queue state, blotter history, or backend audits.</p>
+                  </div>
+                  <button className="command-button" onClick={togglePaperBotEnabled}>{paperBotState.enabled ? 'Pause bot' : 'Resume bot'}</button>
+                </div>
+                <div className="stack-row review-row intervention-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Safe mode override</strong>
+                      <span className={`status-pill ${paperBotState.operatorSafeMode ? 'tone-warn' : 'tone-muted'}`}>{paperBotState.operatorSafeMode ? 'MANUAL SAFE MODE' : 'OPEN'}</span>
+                    </div>
+                    <p>Prevents fresh queueing and activation while still letting existing positions keep managing out.</p>
+                  </div>
+                  <button className={`command-button ${paperBotState.operatorSafeMode ? 'active' : ''}`} onClick={togglePaperBotSafeMode}>{paperBotState.operatorSafeMode ? 'Disable safe mode' : 'Enable safe mode'}</button>
+                </div>
+                <div className="stack-row review-row intervention-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Skip low-confidence setups</strong>
+                      <span className={`status-pill ${paperBotState.skipLowConfidence ? 'tone-good' : 'tone-muted'}`}>{paperBotState.skipLowConfidence ? `ON < ${pct(paperBotState.minimumConfidence)}` : 'OFF'}</span>
+                    </div>
+                    <p>Fresh paper risk is filtered when confidence falls under the operator floor.</p>
+                  </div>
+                  <div className="table-actions">
+                    <button className={`command-button ${paperBotState.skipLowConfidence ? 'active' : ''}`} onClick={toggleSkipLowConfidence}>{paperBotState.skipLowConfidence ? 'Disable filter' : 'Enable filter'}</button>
+                    <button className="command-button" onClick={cycleConfidenceFloor}>Floor {pct(paperBotState.minimumConfidence)}</button>
+                  </div>
+                </div>
+                <div className="stack-row review-row intervention-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Force one tick</strong>
+                      <span className="status-pill tone-good">MANUAL</span>
+                    </div>
+                    <p>Runs the paper bot immediately against the current board instead of waiting for the next cadence window.</p>
+                  </div>
+                  <button className="command-button" onClick={runPaperBotNow} disabled={!markets.length}>Force tick</button>
+                </div>
+              </div>
+            </div>
           </div>
           <div className="review-diagnostics-grid after-action-grid">
             <div className="intel-card">
@@ -1525,6 +1803,7 @@ function App() {
                         <span className={`status-pill ${paperBotBackend.staleStatus === 'stale' ? 'tone-bad' : paperBotBackend.staleStatus === 'watch' ? 'tone-warn' : paperBotBackend.staleStatus === 'fresh' ? 'tone-good' : 'tone-muted'}`}>{paperBotBackend.staleStatus.toUpperCase()}</span>
                       </div>
                       <p>{paperBotBackend.staleReason ?? 'Backend status metadata is present but did not include a runtime note.'}</p>
+                      {backendLedgerScope ? <p className="subtle">Runner target: {backendLedgerScope.documentPath}{appLedgerScope ? ownerScopeAligned ? ' (matches signed-in app owner).' : ' (does not match the signed-in app owner path).' : ''}</p> : null}
                     </div>
                     <div className="source-metrics">
                       <small>{paperBotBackend.runner ?? 'runner?'}</small>
@@ -1903,8 +2182,9 @@ function App() {
                           <span className="badge soft">Bid {quotePct(selectedMarket.clobQuote?.bestBid)}</span>
                           <span className="badge soft">Working {selectedWorkingOrders.length}</span>
                           <span className="badge soft">With fills {selectedFilledOrders.length}</span>
-                          <button className="command-button" onClick={handlePlacePaperOrder}>Stage order</button>
+                          <button className="command-button" onClick={handlePlacePaperOrder} disabled={paperRiskGovernor.halted || paperRiskGovernor.safeMode}>Stage order</button>
                         </div>
+                        {(paperRiskGovernor.halted || paperRiskGovernor.safeMode) && <p className="subtle">Order staging is blocked while the risk governor is {paperRiskGovernor.halted ? 'in hard-stop mode' : 'in safe mode'}. {paperRiskGovernor.detail}</p>}
                         <div className="stack-list compact-orders">
                           {selectedOrders.length ? selectedOrders.map((order) => (
                             <div className="stack-row" key={order.id}>
@@ -2029,6 +2309,93 @@ function App() {
           </div>
 
           <div className="review-diagnostics-grid">
+            <div className="intel-card">
+              <div className="subpanel-header">
+                <div>
+                  <span className="detail-label">Risk governor rails</span>
+                  <p className="subtle">Hard caps auto-stop the bot and flip automation off. Safe-mode rails keep existing positions managing out, but block any fresh queueing or activation.</p>
+                </div>
+                <span className={`status-pill tone-${paperRiskGovernor.halted ? 'bad' : paperRiskGovernor.safeMode ? 'warn' : 'good'}`}>{paperRiskGovernor.headline}</span>
+              </div>
+
+              <div className="stack-list compact-review-list exposure-alert-stack">
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Auto-stop behavior</strong>
+                      <span className={`status-pill tone-${paperBotState.autoStopped ? 'bad' : paperBotState.operatorSafeMode || paperRiskGovernor.safeMode ? 'warn' : 'good'}`}>{paperBotState.autoStopped ? 'Auto-stopped' : paperBotState.operatorSafeMode ? 'Operator safe mode' : paperRiskGovernor.safeMode ? 'Risk safe mode' : 'Open'}</span>
+                    </div>
+                    <p>{paperBotState.autoStopped ? `The bot auto-stopped at ${formatDateTime(paperBotState.autoStoppedAt ?? undefined)} and stays disabled until an operator resumes it.` : paperBotState.operatorSafeMode ? 'Operator safe mode is active, so fresh paper risk is paused even though current positions can keep managing out.' : paperRiskGovernor.safeMode ? `${paperRiskGovernor.detail} Fresh queueing and activation stay blocked until the book cools off.` : 'No hard cap is tripped right now. Fresh risk can flow as long as the other execution gates stay open.'}</p>
+                  </div>
+                  <div className="source-metrics">
+                    <small>{paperBotState.haltReason ?? paperBotState.safeModeReason ?? 'No halt reason'}</small>
+                  </div>
+                </div>
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Drawdown rail</strong>
+                      <span className="status-pill tone-muted">{riskRailStatusLabel(paperBotState.riskGovernor.safeModeDrawdownPct, paperBotState.riskGovernor.maxDailyDrawdownPct)}</span>
+                    </div>
+                    <p>Daily losses across closed trades and active open losses first push the desk into safe mode, then hard-stop automation.</p>
+                  </div>
+                </div>
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Exposure rail</strong>
+                      <span className="status-pill tone-muted">{riskRailStatusLabel(paperBotState.riskGovernor.safeModeExposurePct, paperBotState.riskGovernor.maxOpenExposurePct)}</span>
+                    </div>
+                    <p>Total filled plus working paper exposure can warn early, then auto-stop once the hard cap is hit. Location and setup caps are always hard limits.</p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="order-ticket-grid">
+                <label>
+                  <span>Hard drawdown %</span>
+                  <input type="number" min="1" max="50" step="1" value={Math.round(paperBotState.riskGovernor.maxDailyDrawdownPct * 100)} onChange={(event) => updateRiskGovernorSetting('maxDailyDrawdownPct', clampPctInput(Number(event.target.value) || 1, 1, 50) / 100)} />
+                </label>
+                <label>
+                  <span>Safe drawdown %</span>
+                  <input type="number" min="1" max="50" step="1" value={Math.round(paperBotState.riskGovernor.safeModeDrawdownPct * 100)} onChange={(event) => updateRiskGovernorSetting('safeModeDrawdownPct', clampPctInput(Number(event.target.value) || 1, 1, 50) / 100)} />
+                </label>
+                <label>
+                  <span>Hard exposure %</span>
+                  <input type="number" min="5" max="100" step="1" value={Math.round(paperBotState.riskGovernor.maxOpenExposurePct * 100)} onChange={(event) => updateRiskGovernorSetting('maxOpenExposurePct', clampPctInput(Number(event.target.value) || 5, 5, 100) / 100)} />
+                </label>
+                <label>
+                  <span>Safe exposure %</span>
+                  <input type="number" min="5" max="100" step="1" value={Math.round(paperBotState.riskGovernor.safeModeExposurePct * 100)} onChange={(event) => updateRiskGovernorSetting('safeModeExposurePct', clampPctInput(Number(event.target.value) || 5, 5, 100) / 100)} />
+                </label>
+                <label>
+                  <span>Location cap %</span>
+                  <input type="number" min="5" max="100" step="1" value={Math.round(paperBotState.riskGovernor.maxCorrelatedLocationPct * 100)} onChange={(event) => updateRiskGovernorSetting('maxCorrelatedLocationPct', clampPctInput(Number(event.target.value) || 5, 5, 100) / 100)} />
+                </label>
+                <label>
+                  <span>Setup cap %</span>
+                  <input type="number" min="5" max="100" step="1" value={Math.round(paperBotState.riskGovernor.maxCorrelatedSetupPct * 100)} onChange={(event) => updateRiskGovernorSetting('maxCorrelatedSetupPct', clampPctInput(Number(event.target.value) || 5, 5, 100) / 100)} />
+                </label>
+              </div>
+
+              <div className="stack-list compact-review-list exposure-alert-stack">
+                {paperRiskGovernor.guardrails.map((rail) => (
+                  <div className="stack-row review-row" key={rail.key}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{rail.label}</strong>
+                        <span className={`status-pill tone-${rail.breached ? 'bad' : rail.warning ? 'warn' : 'good'}`}>{Math.round(rail.valuePct * 100)}% / {Math.round(rail.limitPct * 100)}%</span>
+                      </div>
+                      <p>{rail.detail}</p>
+                    </div>
+                    <div className="source-metrics">
+                      <small>{rail.remainingPct <= 0 ? 'limit hit' : `${Math.round(rail.remainingPct * 100)}% headroom`}</small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <div className="intel-card">
               <div className="subpanel-header">
                 <div>
@@ -2409,6 +2776,51 @@ function App() {
                   <span className="detail-label">Setup family pressure map</span>
                   <p className="subtle">Push winning families harder and flag losing families before they keep draining expectancy.</p>
                 </div>
+              </div>
+
+              <div className="stack-list compact-review-list">
+                <div className="source-title-row review-list-header">
+                  <strong>Validation gate</strong>
+                  <span className={`status-pill tone-${paperValidationGate.botTrust.status === 'trusted' ? 'good' : paperValidationGate.botTrust.status === 'restricted' ? 'bad' : 'warn'}`}>{paperValidationGate.botTrust.status}</span>
+                </div>
+                <p className="subtle">Promotion requires {paperValidationGate.policy.minClosedTradesForPromotion}+ closes and {signedPct(paperValidationGate.policy.promotionExpectancyPerTrade)} expectancy/trade. Full trust requires {paperValidationGate.policy.minClosedTradesForTrust}+ closes, {signedPct(paperValidationGate.policy.trustExpectancyPerTrade)} expectancy/trade, and healthy family outcomes.</p>
+                <div className="stack-row review-row">
+                  <div>
+                    <div className="source-title-row">
+                      <strong>Desk automation status</strong>
+                      <span className={`status-pill ${automationGateTone(paperValidationGate.botTrust.automationAllowed, paperValidationGate.botTrust.status)}`}>{paperValidationGate.botTrust.automationAllowed ? 'open' : 'blocked'}</span>
+                    </div>
+                    <p>{paperValidationGate.botTrust.note}</p>
+                    {paperValidationGate.botTrust.blockers.length ? <small className="subtle">Blocking now: {paperValidationGate.botTrust.blockers.join(' ')}</small> : <small className="subtle">Sample, expectancy, and family health all currently support normal automation.</small>}
+                  </div>
+                  <div className="source-metrics">
+                    <small>{milestoneLabel(paperValidationGate.botTrust.milestones.sample.current, paperValidationGate.botTrust.milestones.sample.target)} desk closes</small>
+                    <small>{paperValidationGate.botTrust.expectancyPerTrade === null ? '--' : signedPct(paperValidationGate.botTrust.expectancyPerTrade)} expectancy</small>
+                    <small>{paperValidationGate.botTrust.trustedFamilies} trusted families</small>
+                    <small>{paperValidationGate.botTrust.promotedFamilies} promoted families</small>
+                  </div>
+                </div>
+                {paperValidationGate.setupFamilies.length ? paperValidationGate.setupFamilies.map((family) => (
+                  <div className="stack-row review-row" key={`gate-${family.key}`}>
+                    <div>
+                      <div className="source-title-row">
+                        <strong>{setupTypeLabel(family.key as WeatherMarket['resolutionSchema']['kind'])}</strong>
+                        <span className={`status-pill ${family.status === 'trusted' ? 'tone-good' : family.status === 'promoted' ? 'tone-warn' : family.status === 'demoted' || family.status === 'disabled' ? 'tone-bad' : 'tone-muted'}`}>{family.status}</span>
+                        <span className={`status-pill ${automationGateTone(family.automationAllowed, family.status)}`}>{family.automationAllowed ? 'automation open' : 'automation blocked'}</span>
+                      </div>
+                      <p>{family.note}</p>
+                      {family.blockers.length ? <small className="subtle">Blocking now: {family.blockers.join(' ')}</small> : <small className="subtle">This family has earned enough sample and expectancy to participate in automation.</small>}
+                    </div>
+                    <div className="source-metrics">
+                      <small>{family.closedCount} closes</small>
+                      <small>{milestoneLabel(family.milestones.promotionSample.current, family.milestones.promotionSample.target)} to promote</small>
+                      <small>{milestoneLabel(family.milestones.trustSample.current, family.milestones.trustSample.target)} to trust</small>
+                      <small>{family.winRate === null ? '--' : pct(family.winRate)} win rate</small>
+                      <small>{family.expectancyPerTrade === null ? '--' : signedPct(family.expectancyPerTrade)} expectancy</small>
+                      <small>{family.health}</small>
+                    </div>
+                  </div>
+                )) : <p className="subtle">No setup family has enough paper history for a promotion or demotion call yet.</p>}
               </div>
 
               <div className="stack-list compact-review-list">
